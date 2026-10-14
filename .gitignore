@@ -3,6 +3,7 @@
 *.obj
 *.exe
 *.out
+*.pdb
 wallet_tg_miner
 build/
 
