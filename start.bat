@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title vanity_tg
+title wallet_tg_miner
 
 :menu
 cls
-echo   vanity_tg - generator of beautiful WalletTg addresses
+echo   wallet_tg_miner - generator of beautiful WalletTg addresses
 echo   ---------------------------------------------------
 echo.
 echo     1.  Quick search  (subwallet mode, fast)
@@ -27,7 +27,7 @@ set "SUF="
 set /p SUF=Address ending (e.g. TG): 
 if "%SUF%"=="" goto menu
 echo.
-vanity_tg.exe --mode subwallet --suffix %SUF%
+wallet_tg_miner.exe --mode subwallet --suffix %SUF%
 echo.
 pause
 goto menu
@@ -38,14 +38,14 @@ set "SUF="
 set /p SUF=Address ending (e.g. TG): 
 if "%SUF%"=="" goto menu
 echo.
-vanity_tg.exe --mode phrase --suffix %SUF%
+wallet_tg_miner.exe --mode phrase --suffix %SUF%
 echo.
 pause
 goto menu
 
 :test
 echo.
-vanity_tg.exe --selftest
+wallet_tg_miner.exe --selftest
 echo.
 pause
 goto menu

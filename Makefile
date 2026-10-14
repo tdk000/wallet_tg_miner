@@ -1,6 +1,6 @@
-# Makefile for vanity_tg  (Linux / macOS / MinGW / MSYS2)
+# Makefile for wallet_tg_miner  (Linux / macOS / MinGW / MSYS2)
 #
-#   make            build ./vanity_tg
+#   make            build ./wallet_tg_miner
 #   make clean      remove binaries / objects
 #
 # For MSVC use build.bat instead.
@@ -12,19 +12,19 @@ LDLIBS   ?= -pthread
 # Windows (MinGW / MSYS2) needs advapi32 for RtlGenRandom and a .exe suffix.
 ifeq ($(OS),Windows_NT)
   LDLIBS += -ladvapi32
-  BIN := vanity_tg.exe
+  BIN := wallet_tg_miner.exe
 else
-  BIN := vanity_tg
+  BIN := wallet_tg_miner
 endif
 
 HDRS := monocypher.h bip39_english.h
 
 all: $(BIN)
 
-$(BIN): vanity_tg.cpp monocypher.c $(HDRS)
-	$(CXX) $(CXXFLAGS) -o $@ vanity_tg.cpp monocypher.c $(LDLIBS)
+$(BIN): wallet_tg_miner.cpp monocypher.c $(HDRS)
+	$(CXX) $(CXXFLAGS) -o $@ wallet_tg_miner.cpp monocypher.c $(LDLIBS)
 
 clean:
-	rm -f vanity_tg vanity_tg.exe *.o
+	rm -f wallet_tg_miner wallet_tg_miner.exe *.o
 
 .PHONY: all clean
