@@ -1,4 +1,4 @@
-# vanity_tg — генератор «красивых» адресов Telegram Wallet (WalletTg) на C++
+# wallet_tg_miner — генератор «красивых» адресов Telegram Wallet (WalletTg) на C++
 
 Портативная офлайн-утилита, которая подбирает адреса кошелька Telegram
 (`WalletTg`, адрес вида `UQ...`) с заданным окончанием или префиксом.
@@ -15,7 +15,7 @@
 
 | Файл               | Назначение                                                        |
 |--------------------|-------------------------------------------------------------------|
-| `vanity_tg.cpp`    | Вся логика: SHA-256/512, HMAC-SHA512, PBKDF2, BIP39, SLIP-0010, ed25519, хеширование ячеек TON, base64url, CRC16, многопоточный поиск |
+| `wallet_tg_miner.cpp`    | Вся логика: SHA-256/512, HMAC-SHA512, PBKDF2, BIP39, SLIP-0010, ed25519, хеширование ячеек TON, base64url, CRC16, многопоточный поиск |
 | `bip39_english.h`  | Английский словарь BIP39 (2048 слов), сгенерирован автоматически  |
 | `monocypher.c`     | Vendored-криптография (CC0 / BSD-2-Clause) — групповые операции кривой для ed25519 |
 | `monocypher.h`     | Заголовок Monocypher                                              |
@@ -33,15 +33,15 @@
 
 ```bash
 zig cc -O3 -c monocypher.c -o monocypher.o
-zig c++ -std=c++17 -O3 -c vanity_tg.cpp -o vanity_tg.o
-zig c++ -O3 vanity_tg.o monocypher.o -o vanity_tg.exe -ladvapi32   # Windows
-zig c++ -O3 vanity_tg.o monocypher.o -o vanity_tg -pthread         # Linux
+zig c++ -std=c++17 -O3 -c wallet_tg_miner.cpp -o wallet_tg_miner.o
+zig c++ -O3 wallet_tg_miner.o monocypher.o -o wallet_tg_miner.exe -ladvapi32   # Windows
+zig c++ -O3 wallet_tg_miner.o monocypher.o -o wallet_tg_miner -pthread         # Linux
 ```
 
 ### Вариант B. GCC / Clang (Linux, macOS, MinGW)
 
 ```bash
-g++ -std=c++17 -O3 -pthread vanity_tg.cpp monocypher.c -o vanity_tg
+g++ -std=c++17 -O3 -pthread wallet_tg_miner.cpp monocypher.c -o wallet_tg_miner
 ```
 
 На Windows с MinGW добавьте `-ladvapi32`.
@@ -49,7 +49,7 @@ g++ -std=c++17 -O3 -pthread vanity_tg.cpp monocypher.c -o vanity_tg
 ### Вариант C. MSVC (Visual Studio)
 
 ```bat
-cl /nologo /std:c++17 /O2 /EHsc vanity_tg.cpp monocypher.c /Fe:vanity_tg.exe advapi32.lib
+cl /nologo /std:c++17 /O2 /EHsc wallet_tg_miner.cpp monocypher.c /Fe:wallet_tg_miner.exe advapi32.lib
 ```
 
 ### Вариант D. Make / CMake
@@ -64,7 +64,7 @@ make            # или: cmake -B build && cmake --build build --config Release
 
 ## 3. Быстрый старт
 
-**Самый простой способ (Windows):** дважды кликнуть `vanity_tg.exe` — откроется
+**Самый простой способ (Windows):** дважды кликнуть `wallet_tg_miner.exe` — откроется
 мастер, который спросит окончание адреса и режим. Либо запустить `start.bat`
 (меню). Окно не закрывается само.
 
@@ -77,13 +77,13 @@ make            # или: cmake -B build && cmake --build build --config Release
 
 ```bash
 # 1) Проверить, что криптография совпадает с эталоном (обязательно один раз)
-vanity_tg --selftest
+wallet_tg_miner --selftest
 
-# 2) Перебор мнемоники: адрес управляется словами (схема vanity.tg, по умолчанию)
-vanity_tg --mode phrase --suffix TG
+# 2) Перебор мнемоники: адрес управляется словами (схема app, по умолчанию)
+wallet_tg_miner --mode phrase --suffix TG
 
 # 3) Перебор subwalletId: намного быстрее, но адрес зависит от subwalletId
-vanity_tg --mode subwallet --suffix TG
+wallet_tg_miner --mode subwallet --suffix TG
 ```
 
 Пример вывода (режим `phrase`):
@@ -102,7 +102,7 @@ vanity_tg --mode subwallet --suffix TG
   RESULT   : YES - import this phrase into Telegram Wallet (@wallet) and it
              will show THIS address:
                * standard subwalletId 0x7FFF7F11
-               * vanity.tg derivation (PBKDF2 + SLIP-0010 m/44'/607'/0')
+               * app derivation (PBKDF2 + SLIP-0010 m/44'/607'/0')
   Reminder : verify on-chain (address -> public key) before funding.
 ```
 
@@ -118,7 +118,7 @@ vanity_tg --mode subwallet --suffix TG
 | `--ci`          | регистронезависимое совпадение |
 | `--mode phrase` | перебирать мнемонику (по умолчанию). Адрес воспроизводится из слов при импорте в Telegram |
 | `--mode subwallet` | перебирать только `subwalletId` (в ~3000 раз быстрее). Адрес воспроизводится только с тем же `subwalletId` |
-| `--scheme app`  | схема `vanity.tg` (по умолчанию): BIP39-PBKDF2 + SLIP-0010 `m/44'/607'/0'`; совпадает с импортом в Telegram |
+| `--scheme app`  | схема `app` (по умолчанию): BIP39-PBKDF2 + SLIP-0010 `m/44'/607'/0'`; совпадает с импортом в Telegram |
 | `--scheme ton`  | нативная схема TON (`@ton/crypto`); фраза импортируется в обычные TON-кошельки |
 | `--words 12\|24` | длина мнемоники (по умолчанию 12) |
 | `--threads N`   | число потоков (по умолчанию — все ядра) |
@@ -136,11 +136,11 @@ vanity_tg --mode subwallet --suffix TG
 Примеры:
 
 ```bash
-vanity_tg --mode subwallet --suffix wo1f --threads 8
-vanity_tg --mode phrase --suffix TG --words 24
-vanity_tg --mode phrase --scheme ton --suffix TG --words 24
-vanity_tg --mode subwallet --prefix AB --ci
-vanity_tg --mode subwallet --suffix TG --mnemonic "duty radar crop circle search fantasy crane live question gravity confirm corn"
+wallet_tg_miner --mode subwallet --suffix wo1f --threads 8
+wallet_tg_miner --mode phrase --suffix TG --words 24
+wallet_tg_miner --mode phrase --scheme ton --suffix TG --words 24
+wallet_tg_miner --mode subwallet --prefix AB --ci
+wallet_tg_miner --mode subwallet --suffix TG --mnemonic "duty radar crop circle search fantasy crane live question gravity confirm corn"
 ```
 
 ---
@@ -169,7 +169,7 @@ friendly = base64url( tag:u8 | workchain:i8 | hash:256 | crc16:u16 )
 **Режим `phrase`** — меняется сама мнемоника. Поддерживаются две схемы
 (`--scheme`):
 
-* `app` (по умолчанию) — схема `vanity.tg`, функция `FU` из их бандла:
+* `app` (по умолчанию) — BIP39-деривация (функция `FU`):
 
   ```
   mnemonic -> PBKDF2-HMAC-SHA512(пароль=фраза, соль="mnemonic", 2048) -> seed
@@ -178,7 +178,7 @@ friendly = base64url( tag:u8 | workchain:i8 | hash:256 | crc16:u16 )
   ```
 
   Мнемоника при этом — обычная **валидная BIP39** (12 слов с контрольной
-  суммой), как и у `vanity.tg`.
+  суммой).
 
 * `ton` — нативная схема TON, ровно как `mnemonicToPrivateKey` в
   `@ton/crypto`:
@@ -204,8 +204,8 @@ friendly = base64url( tag:u8 | workchain:i8 | hash:256 | crc16:u16 )
 
 > **Важно.** Для самодельного майнера достаточно **12 слов**, у которых и
 > адрес, и приватный ключ выводятся из `FU(фраза)` — это самосогласованно
-> и сразу пригодно к тратам. Сервис `vanity.tg` использует более хитрую
-> схему: он отдаёт **24 слова = anchor(12) + signing(12)**, где адрес
+> и сразу пригодно к тратам. Некоторые сервисы используют более хитрую
+> схему: они отдают **24 слова = anchor(12) + signing(12)**, где адрес
 > строится из `anchor` (слова 1–12), а рабочий ключ берётся из `signing`
 > (слова 13–24) и подменяется в контракте транзакцией `ChangePublicKey`.
 > Это нужно потому, что фразу майнит сервер и не должен знать ваш итоговый
@@ -280,7 +280,7 @@ subwallet try   :       521002/s   (на ядро)
 
 ## 9. Предупреждения
 
-1. **Про схему `vanity.tg` (24 слова).** Сервис отдаёт **24 слова =
+1. **Про схему с 24 словами.** Сервис отдаёт **24 слова =
    anchor(12) + signing(12)**: адрес строится из `anchor` (слова 1–12), а
    рабочий ключ — из `signing` (слова 13–24), после чего ключ контракта
    подменяется транзакцией `ChangePublicKey`. Поэтому фраза из 24 слов
@@ -290,7 +290,7 @@ subwallet try   :       521002/s   (на ядро)
    выводятся и адрес, и ключ (`FU(фраза)`), без всякой ротации — такой
    адрес сразу пригоден к тратам.
 2. **Выбирайте схему под свой кошелёк.** `--scheme app` (умолчание)
-   повторяет деривацию `vanity.tg` и совпадает с импортом в Telegram
+   повторяет app-деривацию и совпадает с импортом в Telegram
    Wallet; `--scheme ton` повторяет нативную TON-деривацию (`@ton/crypto`).
    Сгенерированную фразу сначала проверьте импортом (адрес должен совпасть
    с найденным) и только потом переводите средства.
@@ -307,7 +307,7 @@ subwallet try   :       521002/s   (на ядро)
 
 ## 10. Лицензии и сторонний код
 
-* Код в `vanity_tg.cpp` и `bip39_english.h` — публичное достояние
+* Код в `wallet_tg_miner.cpp` и `bip39_english.h` — публичное достояние
   (используйте как угодно).
 * **Monocypher** (`monocypher.c`, `monocypher.h`) — © Loup Vaillant,
   двойная лицензия **CC0-1.0 / BSD-2-Clause**. Полный текст — в шапке

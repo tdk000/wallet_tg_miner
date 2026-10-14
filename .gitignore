@@ -3,7 +3,7 @@
 *.obj
 *.exe
 *.out
-vanity_tg
+wallet_tg_miner
 build/
 
 # cross-compiled binaries / archives

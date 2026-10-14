@@ -1,5 +1,5 @@
 // ============================================================================
-//  vanity_tg.cpp  —  portable vanity-address miner for Telegram Wallet (WalletTg)
+//  wallet_tg_miner.cpp  —  portable beauty-address miner for Telegram Wallet (WalletTg)
 // ----------------------------------------------------------------------------
 //  Generates WalletTg "beautiful" addresses entirely offline.
 //
@@ -23,8 +23,8 @@
 //          (Monocypher is CC0 / BSD-2-Clause), BIP39 wordlist (public domain).
 //
 //  Build:
-//      zig c++ -std=c++17 -O3 -o vanity_tg vanity_tg.cpp monocypher.c
-//      g++     -std=c++17 -O3 -pthread -o vanity_tg vanity_tg.cpp monocypher.c
+//      zig c++ -std=c++17 -O3 -o wallet_tg_miner wallet_tg_miner.cpp monocypher.c
+//      g++     -std=c++17 -O3 -pthread -o wallet_tg_miner wallet_tg_miner.cpp monocypher.c
 //
 //  This tool is for the owner of the key. It never talks to the network.
 // ============================================================================
@@ -374,7 +374,7 @@ void bip39_from_entropy(const uint8_t *ent, int entBytes, std::string &out){
 }
 
 // ===========================================================================
-//  Slip-0010 / vanity.tg derivation (=== the app's "FU")
+//  Slip-0010 / app derivation (=== the app's "FU")
 //      seed = PBKDF2-HMAC-SHA512(mnemonic, salt="mnemonic", 2048, 64)
 //      key  = SLIP-0010 ed25519  m/44'/607'/0'
 // ===========================================================================
@@ -586,7 +586,7 @@ struct Rng {
 // ===========================================================================
 struct Options {
     std::string mode = "phrase";     // phrase | subwallet
-    std::string scheme = "app";      // app (vanity.tg) | ton (native)
+    std::string scheme = "app";      // app (compat) | ton (native)
     std::string suffix, prefix;
     int  matchStart = -1;            // explicit start index (optional)
     bool atGiven = false;
@@ -674,7 +674,7 @@ static bool selftest(){
         } else printf("[ok]   address vector (on-chain)\n");
     }
 
-    // known mnemonic -> pubkey + address (vanity.tg derivation)
+    // known mnemonic -> pubkey + address (app derivation)
     {
         const std::string m =
             "abandon abandon abandon abandon abandon abandon "
@@ -900,7 +900,7 @@ static void benchmark(){
 
 static void usage(const char *prog){
     printf(
-"vanity_tg - offline vanity address miner for Telegram Wallet (WalletTg)\n\n"
+"wallet_tg_miner - offline beauty address miner for Telegram Wallet (WalletTg)\n\n"
 "Usage: %s (--suffix STR | --prefix STR) [options]\n\n"
 "Match:\n"
 "  --suffix STR       require the address to end with STR (default mode)\n"
@@ -915,7 +915,7 @@ static void usage(const char *prog){
 "                     is NOT reproducible by Telegram without the same subwalletId.\n"
 "\n"
 "Derivation scheme:\n"
-"  --scheme app       vanity.tg scheme (default): PBKDF2(salt=\"mnemonic\") + SLIP-0010\n"
+"  --scheme app       app scheme (default): PBKDF2(salt=\"mnemonic\") + SLIP-0010\n"
 "                      m/44'/607'/0' + ed25519. Matches Telegram Wallet on import.\n"
 "  --scheme ton       TON-native scheme (@ton/crypto mnemonicToPrivateKey):\n"
 "                      24-word phrase importable into standard TON wallets\n"
@@ -977,7 +977,7 @@ static int run_main(int argc, char **argv){
         fprintf(stderr, "error: --mode must be 'phrase' or 'subwallet'\n"); return 2;
     }
     if (o.scheme != "app" && o.scheme != "ton"){
-        fprintf(stderr, "error: --scheme must be 'app' (vanity.tg) or 'ton' (native)\n"); return 2;
+        fprintf(stderr, "error: --scheme must be 'app' or 'ton' (native)\n"); return 2;
     }
     if (o.words != 12 && o.words != 24){
         fprintf(stderr, "error: --words must be 12 or 24\n"); return 2;
@@ -1002,7 +1002,7 @@ static int run_main(int argc, char **argv){
     int nthreads = o.threads > 0 ? o.threads : (int)std::thread::hardware_concurrency();
     if (nthreads <= 0) nthreads = 1;
 
-    printf("vanity_tg  |  mode=%s  scheme=%s  match=%s  start=%d  ci=%d  threads=%d%s\n",
+    printf("wallet_tg_miner  |  mode=%s  scheme=%s  match=%s  start=%d  ci=%d  threads=%d%s\n",
            o.mode.c_str(), o.scheme.c_str(), o.pattern.c_str(), o.matchStart, (int)o.ci, nthreads,
            o.testnet ? "  [testnet]" : "");
     {
@@ -1051,7 +1051,7 @@ static int run_main(int argc, char **argv){
         printf("searching subwalletId in [0, 2^32) ...\n\n");
     } else {
         printf("searching %s mnemonics (subwalletId = 0x%08X) ...\n\n",
-               o.scheme == "ton" ? "TON" : "BIP39/vanity.tg", o.subwalletId);
+               o.scheme == "ton" ? "TON" : "BIP39/app", o.subwalletId);
     }
 
     // ---- progress thread ---------------------------------------------------
@@ -1112,7 +1112,7 @@ static int run_main(int argc, char **argv){
         printf("  RESULT   : YES - import this phrase into Telegram Wallet (@wallet) and it\n");
         printf("             will show THIS address:\n");
         printf("               * standard subwalletId 0x%08X\n", found.subwalletId);
-        printf("               * vanity.tg derivation (PBKDF2 + SLIP-0010 m/44'/607'/0')\n");
+        printf("               * app derivation (PBKDF2 + SLIP-0010 m/44'/607'/0')\n");
     } else if (standardSubwallet){
         printf("  RESULT   : YES for TON-native wallets (Tonkeeper etc.) - standard\n");
         printf("             subwalletId 0x%08X + @ton/crypto mnemonicToPrivateKey.\n", found.subwalletId);
@@ -1143,7 +1143,7 @@ static std::string read_line(const char *prompt){
 }
 
 static int interactive_wizard(){
-    printf("\n=== vanity_tg - beauty address for WalletTg ===\n\n");
+    printf("\n=== wallet_tg_miner - beauty address for WalletTg ===\n\n");
     printf("Addresses look like:  UQ................................zz\n\n");
 
     std::string suf = read_line("Desired ending of the address (e.g. TG): ");
@@ -1158,7 +1158,7 @@ static int interactive_wizard(){
     const char *m = (mode == "2") ? "subwallet" : "phrase";
 
     printf("\nStarting...\n\n");
-    std::vector<std::string> a = { "vanity_tg", "--mode", m, "--suffix", suf };
+    std::vector<std::string> a = { "wallet_tg_miner", "--mode", m, "--suffix", suf };
     std::vector<char *> av;
     for (auto &x : a) av.push_back(const_cast<char *>(x.c_str()));
     return run_main((int)av.size(), av.data());

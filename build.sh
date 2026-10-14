@@ -1,10 +1,10 @@
 #!/bin/sh
-# Build vanity_tg on Linux / macOS.
+# Build wallet_tg_miner on Linux / macOS.
 set -e
 
 CXX="${CXX:-g++}"
-SRC="vanity_tg.cpp monocypher.c"
-OUT="vanity_tg"
+SRC="wallet_tg_miner.cpp monocypher.c"
+OUT="wallet_tg_miner"
 
 echo "Using: $CXX"
 $CXX -std=c++17 -O3 -pthread $SRC -o "$OUT"
