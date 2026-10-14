@@ -1,0 +1,1182 @@
+// ============================================================================
+//  vanity_tg.cpp  —  portable vanity-address miner for Telegram Wallet (WalletTg)
+// ----------------------------------------------------------------------------
+//  Generates WalletTg "beautiful" addresses entirely offline.
+//
+//  An account address is:
+//      hash = SHA256( StateInit{ code = WalletTrampoline, data = <storage> } )
+//      storage = 0x00 | seqno:uint32 | subwalletId:uint32 | publicKey:bits256
+//      friendly = base64url( tag:u8 | workchain:i8 | hash:bits256 | crc16:u16 )
+//
+//  Two search modes:
+//    phrase     : vary the 12/24-word BIP39 mnemonic (subwalletId fixed).
+//                 Slower per try (PBKDF2-2048 + SLIP-0010 + ed25519) but the
+//                 resulting address IS reproducible from the mnemonic -- this is
+//                 the mode to use when you want to import the phrase into Telegram.
+//    subwallet  : keep the mnemonic/key fixed and vary subwalletId (2^32 space).
+//                 Only a SHA-256 + CRC + base64 per try -> 1000x faster, but the
+//                 address is NOT reproducible from the mnemonic alone: a standard
+//                 client (Telegram Wallet) needs the same custom subwalletId.
+//
+//  Crypto: self-contained SHA-256 / SHA-512 / HMAC-SHA512 / PBKDF2 (this file),
+//          Ed25519 public-key derivation via Monocypher's group primitives
+//          (Monocypher is CC0 / BSD-2-Clause), BIP39 wordlist (public domain).
+//
+//  Build:
+//      zig c++ -std=c++17 -O3 -o vanity_tg vanity_tg.cpp monocypher.c
+//      g++     -std=c++17 -O3 -pthread -o vanity_tg vanity_tg.cpp monocypher.c
+//
+//  This tool is for the owner of the key. It never talks to the network.
+// ============================================================================
+
+#define _CRT_SECURE_NO_WARNINGS
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <cctype>
+#include <string>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <algorithm>
+
+#include "monocypher.h"
+#include "bip39_english.h"
+
+// ===========================================================================
+//  Platform entropy (used only to seed the per-thread ChaCha20 DRBG)
+// ===========================================================================
+#if defined(_WIN32)
+   // RtlGenRandom from advapi32 (no windows.h needed -> keeps the link tiny)
+   extern "C" __declspec(dllimport) unsigned char __stdcall
+   SystemFunction036(void *buf, unsigned long len);
+   static bool os_random(void *buf, size_t len) {
+       return SystemFunction036(buf, (unsigned long)len) != 0;
+   }
+   // kernel32: how many processes share our console? If it's just us, the user
+   // double-clicked the .exe and the window would vanish instantly.
+   extern "C" __declspec(dllimport) unsigned long __stdcall
+   GetConsoleProcessList(unsigned long *lpdwProcessList, unsigned long dwProcessCount);
+   static bool launched_by_double_click() {
+       unsigned long procs[4];
+       unsigned long n = GetConsoleProcessList(procs, 4);
+       return n <= 1;
+   }
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#  if defined(__linux__)
+#    include <sys/random.h>
+#  endif
+   static bool os_random(void *buf, size_t len) {
+       uint8_t *p = (uint8_t *)buf;
+       size_t got = 0;
+#  if defined(__linux__)
+       while (got < len) {
+           ssize_t n = getrandom(p + got, len - got, 0);
+           if (n <= 0) break;
+           got += (size_t)n;
+       }
+       if (got == len) return true;
+       got = 0;
+#  endif
+       int fd = open("/dev/urandom", O_RDONLY);
+       if (fd < 0) return false;
+       while (got < len) {
+           ssize_t n = read(fd, p + got, len - got);
+           if (n <= 0) break;
+           got += (size_t)n;
+       }
+       close(fd);
+       return got == len;
+   }
+   static bool launched_by_double_click() { return false; }
+#endif
+
+// ===========================================================================
+//  SHA-256
+// ===========================================================================
+namespace {
+
+const uint32_t SHA256_K[64] = {
+    0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+    0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+    0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+    0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+    0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+    0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+    0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+    0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u
+};
+inline uint32_t rotr32(uint32_t x, int n){ return (x >> n) | (x << (32 - n)); }
+
+struct Sha256 {
+    uint32_t h[8];
+    uint64_t total;      // bytes
+    uint8_t  buf[64];
+    size_t   buflen;
+};
+
+void sha256_init(Sha256 *s){
+    s->h[0]=0x6a09e667u; s->h[1]=0xbb67ae85u; s->h[2]=0x3c6ef372u; s->h[3]=0xa54ff53au;
+    s->h[4]=0x510e527fu; s->h[5]=0x9b05688cu; s->h[6]=0x1f83d9abu; s->h[7]=0x5be0cd19u;
+    s->total=0; s->buflen=0;
+}
+
+void sha256_block(uint32_t h[8], const uint8_t *p){
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)p[i*4] << 24) | ((uint32_t)p[i*4+1] << 16) |
+               ((uint32_t)p[i*4+2] << 8) | (uint32_t)p[i*4+3];
+    for (int i = 16; i < 64; i++){
+        uint32_t s0 = rotr32(w[i-15],7) ^ rotr32(w[i-15],18) ^ (w[i-15] >> 3);
+        uint32_t s1 = rotr32(w[i-2],17) ^ rotr32(w[i-2],19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+    for (int i = 0; i < 64; i++){
+        uint32_t S1 = rotr32(e,6) ^ rotr32(e,11) ^ rotr32(e,25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t t1 = hh + S1 + ch + SHA256_K[i] + w[i];
+        uint32_t S0 = rotr32(a,2) ^ rotr32(a,13) ^ rotr32(a,22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t t2 = S0 + maj;
+        hh=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
+}
+
+void sha256_update(Sha256 *s, const void *data, size_t len){
+    const uint8_t *p = (const uint8_t *)data;
+    s->total += len;
+    if (s->buflen){
+        size_t need = 64 - s->buflen;
+        if (len < need){ memcpy(s->buf + s->buflen, p, len); s->buflen += len; return; }
+        memcpy(s->buf + s->buflen, p, need);
+        sha256_block(s->h, s->buf);
+        p += need; len -= need; s->buflen = 0;
+    }
+    while (len >= 64){ sha256_block(s->h, p); p += 64; len -= 64; }
+    if (len){ memcpy(s->buf, p, len); s->buflen = len; }
+}
+
+void sha256_final(Sha256 *s, uint8_t out[32]){
+    uint64_t bits = s->total * 8;
+    size_t padlen = (s->buflen < 56) ? (56 - s->buflen) : (120 - s->buflen);
+    uint8_t pad[128];
+    memset(pad, 0, padlen + 8);
+    pad[0] = 0x80;
+    for (int i = 0; i < 8; i++) pad[padlen + i] = (uint8_t)(bits >> (56 - i*8));
+    sha256_update(s, pad, padlen + 8);
+    for (int i = 0; i < 8; i++){
+        out[i*4]   = (uint8_t)(s->h[i] >> 24);
+        out[i*4+1] = (uint8_t)(s->h[i] >> 16);
+        out[i*4+2] = (uint8_t)(s->h[i] >> 8);
+        out[i*4+3] = (uint8_t)(s->h[i]);
+    }
+}
+
+void sha256(const void *data, size_t len, uint8_t out[32]){
+    Sha256 s; sha256_init(&s); sha256_update(&s, data, len); sha256_final(&s, out);
+}
+
+// ===========================================================================
+//  SHA-512
+// ===========================================================================
+const uint64_t SHA512_K[80] = {
+    0x428a2f98d728ae22ULL,0x7137449123ef65cdULL,0xb5c0fbcfec4d3b2fULL,0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL,0x59f111f1b605d019ULL,0x923f82a4af194f9bULL,0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL,0x12835b0145706fbeULL,0x243185be4ee4b28cULL,0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL,0x80deb1fe3b1696b1ULL,0x9bdc06a725c71235ULL,0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL,0xefbe4786384f25e3ULL,0x0fc19dc68b8cd5b5ULL,0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL,0x4a7484aa6ea6e483ULL,0x5cb0a9dcbd41fbd4ULL,0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL,0xa831c66d2db43210ULL,0xb00327c898fb213fULL,0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL,0xd5a79147930aa725ULL,0x06ca6351e003826fULL,0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL,0x2e1b21385c26c926ULL,0x4d2c6dfc5ac42aedULL,0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL,0x766a0abb3c77b2a8ULL,0x81c2c92e47edaee6ULL,0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL,0xa81a664bbc423001ULL,0xc24b8b70d0f89791ULL,0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL,0xd69906245565a910ULL,0xf40e35855771202aULL,0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL,0x1e376c085141ab53ULL,0x2748774cdf8eeb99ULL,0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL,0x4ed8aa4ae3418acbULL,0x5b9cca4f7763e373ULL,0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL,0x78a5636f43172f60ULL,0x84c87814a1f0ab72ULL,0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL,0xa4506cebde82bde9ULL,0xbef9a3f7b2c67915ULL,0xc67178f2e372532bULL,
+    0xca273eceea26619cULL,0xd186b8c721c0c207ULL,0xeada7dd6cde0eb1eULL,0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL,0x0a637dc5a2c898a6ULL,0x113f9804bef90daeULL,0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL,0x32caab7b40c72493ULL,0x3c9ebe0a15c9bebcULL,0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL,0x597f299cfc657e2aULL,0x5fcb6fab3ad6faecULL,0x6c44198c4a475817ULL
+};
+inline uint64_t rotr64(uint64_t x, int n){ return (x >> n) | (x << (64 - n)); }
+
+struct Sha512 {
+    uint64_t h[8];
+    uint64_t total;      // bytes
+    uint8_t  buf[128];
+    size_t   buflen;
+};
+
+void sha512_init(Sha512 *s){
+    s->h[0]=0x6a09e667f3bcc908ULL; s->h[1]=0xbb67ae8584caa73bULL;
+    s->h[2]=0x3c6ef372fe94f82bULL; s->h[3]=0xa54ff53a5f1d36f1ULL;
+    s->h[4]=0x510e527fade682d1ULL; s->h[5]=0x9b05688c2b3e6c1fULL;
+    s->h[6]=0x1f83d9abfb41bd6bULL; s->h[7]=0x5be0cd19137e2179ULL;
+    s->total=0; s->buflen=0;
+}
+
+void sha512_block(uint64_t h[8], const uint8_t *p){
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++){
+        uint64_t v = 0;
+        for (int j = 0; j < 8; j++) v = (v << 8) | p[i*8+j];
+        w[i] = v;
+    }
+    for (int i = 16; i < 80; i++){
+        uint64_t s0 = rotr64(w[i-15],1) ^ rotr64(w[i-15],8) ^ (w[i-15] >> 7);
+        uint64_t s1 = rotr64(w[i-2],19) ^ rotr64(w[i-2],61) ^ (w[i-2] >> 6);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint64_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+    for (int i = 0; i < 80; i++){
+        uint64_t S1 = rotr64(e,14) ^ rotr64(e,18) ^ rotr64(e,41);
+        uint64_t ch = (e & f) ^ (~e & g);
+        uint64_t t1 = hh + S1 + ch + SHA512_K[i] + w[i];
+        uint64_t S0 = rotr64(a,28) ^ rotr64(a,34) ^ rotr64(a,39);
+        uint64_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t t2 = S0 + maj;
+        hh=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
+}
+
+void sha512_update(Sha512 *s, const void *data, size_t len){
+    const uint8_t *p = (const uint8_t *)data;
+    s->total += len;
+    if (s->buflen){
+        size_t need = 128 - s->buflen;
+        if (len < need){ memcpy(s->buf + s->buflen, p, len); s->buflen += len; return; }
+        memcpy(s->buf + s->buflen, p, need);
+        sha512_block(s->h, s->buf);
+        p += need; len -= need; s->buflen = 0;
+    }
+    while (len >= 128){ sha512_block(s->h, p); p += 128; len -= 128; }
+    if (len){ memcpy(s->buf, p, len); s->buflen = len; }
+}
+
+void sha512_final(Sha512 *s, uint8_t out[64]){
+    uint64_t bits = s->total * 8;
+    size_t padlen = (s->buflen < 112) ? (112 - s->buflen) : (240 - s->buflen);
+    uint8_t pad[256];
+    memset(pad, 0, padlen + 16);
+    pad[0] = 0x80;
+    for (int i = 0; i < 8; i++) pad[padlen + 8 + i] = (uint8_t)(bits >> (56 - i*8));
+    sha512_update(s, pad, padlen + 16);
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++)
+            out[i*8+j] = (uint8_t)(s->h[i] >> (56 - j*8));
+}
+
+void sha512(const void *data, size_t len, uint8_t out[64]){
+    Sha512 s; sha512_init(&s); sha512_update(&s, data, len); sha512_final(&s, out);
+}
+
+// ===========================================================================
+//  HMAC-SHA512  (with precomputed key schedule for PBKDF2)
+// ===========================================================================
+struct HmacKey512 { uint8_t ipad[128]; uint8_t opad[128]; };
+
+void hmac512_key(HmacKey512 *k, const void *key, size_t keylen){
+    uint8_t kb[128];
+    memset(kb, 0, sizeof(kb));
+    if (keylen > 128){ sha512(key, keylen, kb); }
+    else memcpy(kb, key, keylen);
+    for (int i = 0; i < 128; i++){
+        k->ipad[i] = (uint8_t)(kb[i] ^ 0x36);
+        k->opad[i] = (uint8_t)(kb[i] ^ 0x5c);
+    }
+    memset(kb, 0, sizeof(kb));
+}
+
+void hmac512_pre(const HmacKey512 *k, const void *msg, size_t msglen, uint8_t out[64]){
+    uint8_t inner[64];
+    Sha512 s;
+    sha512_init(&s);
+    sha512_update(&s, k->ipad, 128);
+    sha512_update(&s, msg, msglen);
+    sha512_final(&s, inner);
+    sha512_init(&s);
+    sha512_update(&s, k->opad, 128);
+    sha512_update(&s, inner, 64);
+    sha512_final(&s, out);
+}
+
+void hmac512(const void *key, size_t keylen, const void *msg, size_t msglen, uint8_t out[64]){
+    HmacKey512 k; hmac512_key(&k, key, keylen); hmac512_pre(&k, msg, msglen, out);
+}
+
+// PBKDF2-HMAC-SHA512, dkLen == 64 -> exactly one output block.
+void pbkdf2_sha512_1block(const HmacKey512 *key, const uint8_t *salt, size_t saltlen,
+                          uint32_t iters, uint8_t out[64]){
+    uint8_t msg[512];
+    memcpy(msg, salt, saltlen);
+    msg[saltlen+0] = 0; msg[saltlen+1] = 0; msg[saltlen+2] = 0; msg[saltlen+3] = 1;
+    uint8_t U[64];
+    hmac512_pre(key, msg, saltlen + 4, U);
+    memcpy(out, U, 64);
+    for (uint32_t i = 1; i < iters; i++){
+        hmac512_pre(key, U, 64, U);
+        for (int j = 0; j < 64; j++) out[j] ^= U[j];
+    }
+}
+
+// ===========================================================================
+//  Ed25519 public key from a 32-byte seed (standard: SHA-512 based)
+// ===========================================================================
+void ed25519_pubkey(uint8_t pk[32], const uint8_t seed[32]){
+    uint8_t h[64], a[32], b[32];
+    sha512(seed, 32, h);
+    memcpy(a, h, 32);
+    crypto_eddsa_trim_scalar(b, a);   // clamp
+    crypto_eddsa_scalarbase(pk, b);   // pk = a * B
+    memset(h, 0, sizeof(h));
+    memset(a, 0, sizeof(a));
+    memset(b, 0, sizeof(b));
+}
+
+// ===========================================================================
+//  BIP39
+// ===========================================================================
+// word count -> entropy bytes: 12 words -> 16, 24 words -> 32
+static inline int bip39_ent_bytes(int words){ return words / 3 * 4; }
+
+// entropy (128 or 256 bits) -> mnemonic string
+void bip39_from_entropy(const uint8_t *ent, int entBytes, std::string &out){
+    int entBits = entBytes * 8;
+    int csBits  = entBits / 32;
+    uint8_t hash[32];
+    sha256(ent, entBytes, hash);
+    int totalBits = entBits + csBits;
+    int words = totalBits / 11;
+    out.clear();
+    for (int w = 0; w < words; w++){
+        int idx = 0;
+        for (int b = 0; b < 11; b++){
+            int pos = w * 11 + b, bit;
+            if (pos < entBits) bit = (ent[pos >> 3] >> (7 - (pos & 7))) & 1;
+            else { int c = pos - entBits; bit = (hash[c >> 3] >> (7 - (c & 7))) & 1; }
+            idx = (idx << 1) | bit;
+        }
+        if (w) out += ' ';
+        out += BIP39_ENGLISH[idx];
+    }
+}
+
+// ===========================================================================
+//  Slip-0010 / vanity.tg derivation (=== the app's "FU")
+//      seed = PBKDF2-HMAC-SHA512(mnemonic, salt="mnemonic", 2048, 64)
+//      key  = SLIP-0010 ed25519  m/44'/607'/0'
+// ===========================================================================
+void app_derive_secret(const std::string &mnemonic, uint8_t secret[32]){
+    HmacKey512 hk;
+    hmac512_key(&hk, mnemonic.data(), mnemonic.size());          // password = mnemonic
+    uint8_t seed[64];
+    pbkdf2_sha512_1block(&hk, (const uint8_t *)"mnemonic", 8, 2048, seed); // salt = "mnemonic"
+
+    uint8_t I[64], k[32], c[32];
+    hmac512("ed25519 seed", 12, seed, 64, I);
+    memcpy(k, I, 32); memcpy(c, I + 32, 32);
+
+    const uint32_t path[3] = { 44, 607, 0 };
+    for (int i = 0; i < 3; i++){
+        uint8_t data[37];
+        data[0] = 0;
+        memcpy(data + 1, k, 32);
+        uint32_t idx = path[i] | 0x80000000u;
+        data[33] = (uint8_t)(idx >> 24); data[34] = (uint8_t)(idx >> 16);
+        data[35] = (uint8_t)(idx >> 8);  data[36] = (uint8_t)(idx);
+        hmac512(c, 32, data, 37, I);
+        memcpy(k, I, 32); memcpy(c, I + 32, 32);
+    }
+    memcpy(secret, k, 32);
+    memset(seed, 0, sizeof(seed));
+    memset(I, 0, sizeof(I));
+}
+
+// ===========================================================================
+//  TON-native derivation (=== @ton/crypto "mnemonicToPrivateKey")
+//      entropy = HMAC-SHA512(key = mnemonic, msg = "")
+//      seed    = PBKDF2-HMAC-SHA512(password = entropy, salt = "TON default seed",
+//                                   100000, 64)
+//      key     = seed[0..31]
+//  A mnemonic is "valid" for TON when
+//      PBKDF2(entropy, "TON seed version", 390)[0] == 0
+// ===========================================================================
+void ton_entropy(const std::string &mnemonic, uint8_t entropy[64]){
+    static const uint8_t empty = 0;
+    hmac512(mnemonic.data(), mnemonic.size(), &empty, 0, entropy);
+}
+
+bool ton_is_basic_seed(const uint8_t entropy[64]){
+    HmacKey512 hk; hmac512_key(&hk, entropy, 64);
+    uint8_t out[64];
+    pbkdf2_sha512_1block(&hk, (const uint8_t *)"TON seed version", 16, 390, out);
+    return out[0] == 0;
+}
+
+void ton_derive_secret(const std::string &mnemonic, uint8_t secret[32]){
+    uint8_t entropy[64];
+    ton_entropy(mnemonic, entropy);
+    HmacKey512 hk; hmac512_key(&hk, entropy, 64);
+    uint8_t seed[64];
+    pbkdf2_sha512_1block(&hk, (const uint8_t *)"TON default seed", 16, 100000, seed);
+    memcpy(secret, seed, 32);
+    memset(entropy, 0, sizeof(entropy));
+    memset(seed, 0, sizeof(seed));
+}
+
+// ===========================================================================
+//  TON account address for a WalletTg state
+// ===========================================================================
+static uint8_t g_codeHash[32];
+static uint8_t g_dataDescPrefix[2] = { 0x00, 0x52 }; // refs=0, bits=(41+41)
+
+void wallet_init_code_hash(){
+    // WalletTrampoline.fif  (192 bits, 0 refs)
+    static const uint8_t CODE[24] = {
+        0xFF,0x00,0x20,0x98,0x21,0xD7,0x49,0x83,0x08,0xB9,0xF2,0x40,
+        0xDF,0x80,0x85,0xF8,0x33,0xD0,0xED,0x1E,0x20,0xED,0x53,0xD9
+    };
+    uint8_t repr[2 + 24];
+    repr[0] = 0x00;   // refs descriptor
+    repr[1] = 0x30;   // bits descriptor = ceil(192/8)+floor(192/8) = 48
+    memcpy(repr + 2, CODE, 24);
+    sha256(repr, sizeof(repr), g_codeHash);
+}
+
+// build the 36-byte friendly address buffer
+void wallet_address(const uint8_t pubkey[32], uint32_t subwalletId, bool testnet,
+                    uint8_t out36[36]){
+    uint8_t data[41];
+    data[0] = 0x00;                       // storage tag / version
+    data[1] = data[2] = data[3] = data[4] = 0x00; // seqno = 0 (deploy state)
+    data[5] = (uint8_t)(subwalletId >> 24); data[6] = (uint8_t)(subwalletId >> 16);
+    data[7] = (uint8_t)(subwalletId >> 8);  data[8] = (uint8_t)(subwalletId);
+    memcpy(data + 9, pubkey, 32);
+
+    // data cell hash
+    uint8_t drep[2 + 41];
+    drep[0] = g_dataDescPrefix[0]; drep[1] = g_dataDescPrefix[1];
+    memcpy(drep + 2, data, 41);
+    uint8_t dataHash[32];
+    sha256(drep, sizeof(drep), dataHash);
+
+    // state init cell hash:  [0x02,0x01,0x34, codeDepth(2), dataDepth(2), codeHash, dataHash]
+    uint8_t si[2 + 1 + 4 + 64];
+    si[0] = 0x02; si[1] = 0x01; si[2] = 0x34;
+    si[3] = si[4] = si[5] = si[6] = 0x00;
+    memcpy(si + 7,  g_codeHash, 32);
+    memcpy(si + 39, dataHash, 32);
+    uint8_t addrHash[32];
+    sha256(si, sizeof(si), addrHash);
+
+    uint8_t tag = testnet ? 0xD1 : 0x51;   // non-bounceable
+    out36[0] = tag;
+    out36[1] = 0x00;                       // workchain 0
+    memcpy(out36 + 2, addrHash, 32);
+
+    // CRC16 (matches @ton/core: message + two trailing zero bytes)
+    uint32_t reg = 0;
+    for (size_t i = 0; i < 36; i++){
+        uint8_t byte = (i < 34) ? out36[i] : 0x00;
+        for (int mask = 0x80; mask; mask >>= 1){
+            reg <<= 1;
+            if (byte & mask) reg |= 1;
+            if (reg > 0xffff){ reg &= 0xffff; reg ^= 0x1021; }
+        }
+    }
+    out36[34] = (uint8_t)(reg >> 8);
+    out36[35] = (uint8_t)(reg & 0xff);
+}
+
+// ===========================================================================
+//  base64url helpers + pattern matching (only the needed chars are computed)
+// ===========================================================================
+static const char B64URL[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+inline char addr_char(const uint8_t a[36], int idx){
+    int g = idx >> 2, r = idx & 3;
+    uint8_t b0 = a[3*g], b1 = a[3*g+1], b2 = a[3*g+2];
+    unsigned v;
+    switch (r){
+        case 0: v = b0 >> 2; break;
+        case 1: v = ((b0 & 3) << 4) | (b1 >> 4); break;
+        case 2: v = ((b1 & 15) << 2) | (b2 >> 6); break;
+        default:v = b2 & 63; break;
+    }
+    return B64URL[v];
+}
+
+inline bool addr_matches(const uint8_t a[36], const std::string &pat,
+                         int start, bool ci){
+    int n = (int)pat.size();
+    for (int i = 0; i < n; i++){
+        char c = addr_char(a, start + i);
+        char t = pat[i];
+        if (ci){ if (std::tolower((unsigned char)c) != std::tolower((unsigned char)t)) return false; }
+        else   { if (c != t) return false; }
+    }
+    return true;
+}
+
+void addr_to_string(const uint8_t a[36], std::string &out){
+    out.resize(48);
+    for (int i = 0; i < 48; i++) out[i] = addr_char(a, i);
+}
+
+void to_hex(const uint8_t *p, size_t n, std::string &out){
+    static const char *hx = "0123456789abcdef";
+    out.resize(n * 2);
+    for (size_t i = 0; i < n; i++){ out[i*2] = hx[p[i] >> 4]; out[i*2+1] = hx[p[i] & 15]; }
+}
+
+void raw_address_string(const uint8_t a[36], std::string &out){
+    std::string h; to_hex(a + 2, 32, h);
+    out = "0:" + h;
+}
+
+// ===========================================================================
+//  Deterministic RNG (ChaCha20 keystream), seeded from the OS
+// ===========================================================================
+struct Rng {
+    uint8_t key[32], nonce[8];
+    uint64_t ctr;
+    uint8_t buf[64];
+    size_t pos;
+    void seed(){
+        uint8_t s[48];
+        if (!os_random(s, sizeof(s))){ // extremely unlikely fallback
+            for (size_t i = 0; i < sizeof(s); i++) s[i] = (uint8_t)(i * 131 + 7);
+        }
+        memcpy(key, s, 32);
+        memcpy(nonce, s + 32, 8);
+        ctr = 0;
+        for (int i = 0; i < 8; i++) ctr = (ctr << 8) | s[i];
+        pos = 64;
+        memset(s, 0, sizeof(s));
+    }
+    void fill(uint8_t *out, size_t n){
+        static const uint8_t zeros[64] = {0};
+        while (n){
+            if (pos == 64){
+                ctr = crypto_chacha20_djb(buf, zeros, 64, key, nonce, ctr);
+                pos = 0;
+            }
+            size_t take = 64 - pos; if (take > n) take = n;
+            memcpy(out, buf + pos, take);
+            pos += take; out += take; n -= take;
+        }
+    }
+};
+
+// ===========================================================================
+//  Options
+// ===========================================================================
+struct Options {
+    std::string mode = "phrase";     // phrase | subwallet
+    std::string scheme = "app";      // app (vanity.tg) | ton (native)
+    std::string suffix, prefix;
+    int  matchStart = -1;            // explicit start index (optional)
+    bool atGiven = false;
+    bool ci = false;
+    int  words = 12;                 // 12 or 24
+    int  threads = 0;
+    bool testnet = false;
+    uint32_t subwalletId = 0x7FFF7F11u;
+    bool haveSubwallet = false;
+    std::string mnemonic;            // fixed mnemonic (optional)
+    uint64_t maxTries = 0;           // 0 = unlimited
+    bool quiet = false;
+    bool selftest = false;
+    bool bench = false;
+    std::string pattern;
+};
+
+struct Found {
+    std::atomic<bool> ok{false};
+    std::mutex mtx;
+    std::string mnemonic;
+    uint32_t subwalletId = 0;
+    uint8_t pubkey[32];
+    uint8_t addr[36];
+    uint64_t attempts = 0;
+};
+
+static std::atomic<uint64_t> g_attempts{0};
+static std::atomic<bool>     g_stop{false};
+
+// ===========================================================================
+//  Self-test
+// ===========================================================================
+static int hexcmp(const uint8_t *p, size_t n, const char *hex){
+    std::string h; to_hex(p, n, h);
+    return h == hex ? 0 : 1;
+}
+static bool selftest(){
+    int fail = 0;
+    uint8_t d[64];
+
+    sha256("abc", 3, d);
+    if (hexcmp(d,32,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")){
+        printf("[FAIL] sha256(\"abc\")\n"); fail++;
+    } else printf("[ok]   sha256(\"abc\")\n");
+
+    sha512("abc", 3, d);
+    if (hexcmp(d,64,"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                       "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")){
+        printf("[FAIL] sha512(\"abc\")\n"); fail++;
+    } else printf("[ok]   sha512(\"abc\")\n");
+
+    wallet_init_code_hash();
+    if (hexcmp(g_codeHash,32,"9149ae51c1e4689710cebf7830297b16acfbadb363a920a537893e7ffeeca768")){
+        printf("[FAIL] WalletTrampoline code hash\n"); fail++;
+    } else printf("[ok]   WalletTrampoline code hash\n");
+
+    hmac512("key", 3, "The quick brown fox jumps over the lazy dog", 43, d);
+    if (hexcmp(d,64,"b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb"
+                       "82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a")){
+        printf("[FAIL] hmac-sha512\n"); fail++;
+    } else printf("[ok]   hmac-sha512\n");
+
+    {
+        HmacKey512 hk; hmac512_key(&hk, "password", 8);
+        pbkdf2_sha512_1block(&hk, (const uint8_t *)"salt", 4, 1, d);
+        if (hexcmp(d,64,"867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252"
+                           "c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce")){
+            printf("[FAIL] pbkdf2-hmac-sha512\n"); fail++;
+        } else printf("[ok]   pbkdf2-hmac-sha512\n");
+    }
+
+    // known on-chain pubkey -> known address
+    {
+        const char *pubhex = "PUBKEY-REDACTED";
+        uint8_t pub[32];
+        for (int i = 0; i < 32; i++){
+            auto hv = [](char c){ return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
+            pub[i] = (uint8_t)((hv(pubhex[i*2]) << 4) | hv(pubhex[i*2+1]));
+        }
+        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        std::string s; addr_to_string(a, s);
+        if (s != "UQ-REDACTED"){
+            printf("[FAIL] address vector: %s\n", s.c_str()); fail++;
+        } else printf("[ok]   address vector (on-chain)\n");
+    }
+
+    // known mnemonic -> pubkey + address (vanity.tg derivation)
+    {
+        const std::string m =
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon about";
+        uint8_t sec[32]; app_derive_secret(m, sec);
+        if (hexcmp(sec,32,"b477ef5ed17fb8a2b8faddd7a9835a227243a82c70b190c7af4896155aa7df9f")){
+            printf("[FAIL] slip10 secret\n"); fail++;
+        } else printf("[ok]   slip10 secret\n");
+        uint8_t pub[32]; ed25519_pubkey(pub, sec);
+        if (hexcmp(pub,32,"7952e94118f34607c75e23258dd9220d66ccac5a3ee074125c25068e8107bfbf")){
+            printf("[FAIL] ed25519 pubkey\n"); fail++;
+        } else printf("[ok]   ed25519 pubkey\n");
+        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        std::string s; addr_to_string(a, s);
+        if (s != "UQD4d2pzr-W4jzh1wOd52HrsH7rRagzkSUPC3_jCgMxmKz_L"){
+            printf("[FAIL] mnemonic address: %s\n", s.c_str()); fail++;
+        } else printf("[ok]   mnemonic address\n");
+    }
+
+    // BIP39 generation vectors (entropy 0 -> canonical phrases)
+    {
+        uint8_t z[32]; memset(z, 0, sizeof(z));
+        std::string m12, m24;
+        bip39_from_entropy(z, 16, m12);
+        bip39_from_entropy(z, 32, m24);
+        const char *exp12 =
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon about";
+        const char *exp24 =
+            "abandon abandon abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abandon abandon art";
+        if (m12 != exp12){ printf("[FAIL] bip39 12 words: %s\n", m12.c_str()); fail++; }
+        else printf("[ok]   bip39 12 words\n");
+        if (m24 != exp24){ printf("[FAIL] bip39 24 words: %s\n", m24.c_str()); fail++; }
+        else printf("[ok]   bip39 24 words\n");
+    }
+
+    // TON-native derivation vector (from @ton/crypto mnemonicNew + mnemonicToPrivateKey)
+    {
+        const std::string m =
+            "drum taste oyster attract soda salon luxury social fork frog crouch learn "
+            "vessel rescue verify easily paddle insect appear slow noble adapt lyrics head";
+        uint8_t entropy[64];
+        ton_entropy(m, entropy);
+        if (!ton_is_basic_seed(entropy)){ printf("[FAIL] ton isBasicSeed\n"); fail++; }
+        else printf("[ok]   ton isBasicSeed\n");
+        uint8_t sec[32]; ton_derive_secret(m, sec);
+        if (hexcmp(sec,32,"b6e302f84bbb64c04d7b50470ef4264803462cd369fd9dc74349f4a02c0bb9af")){
+            printf("[FAIL] ton secret\n"); fail++;
+        } else printf("[ok]   ton secret\n");
+        uint8_t pub[32]; ed25519_pubkey(pub, sec);
+        if (hexcmp(pub,32,"752e39c11db80956eead808156347d120bbffb655b520ad2748da10c61cd242a")){
+            printf("[FAIL] ton pubkey\n"); fail++;
+        } else printf("[ok]   ton pubkey\n");
+        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        std::string s; addr_to_string(a, s);
+        if (s != "UQDWukXCchiV2P81LG_vOCKhBFmLVY56nuvLUlMTWXrgQH4S"){
+            printf("[FAIL] ton address: %s\n", s.c_str()); fail++;
+        } else printf("[ok]   ton address\n");
+    }
+
+    printf(fail ? "\n%d self-test(s) FAILED\n" : "\nall self-tests passed\n", fail);
+    return fail == 0;
+}
+
+// ===========================================================================
+//  Mining workers
+// ===========================================================================
+// Prepare mutable address bytes with the fixed fields for subwallet mode.
+static void report_found(const Options &o, Found &f, const std::string &mnemonic,
+                         uint32_t subwalletId, const uint8_t pub[32], const uint8_t addr[36]){
+    std::lock_guard<std::mutex> lk(f.mtx);
+    if (f.ok.load()) return;
+    f.mnemonic = mnemonic;
+    f.subwalletId = subwalletId;
+    memcpy(f.pubkey, pub, 32);
+    memcpy(f.addr, addr, 36);
+    f.attempts = g_attempts.load();
+    f.ok = true;
+    g_stop = true;
+}
+
+static void worker_subwallet(const Options &o, Found &f, Rng &rng, int tid, int nthreads,
+                             const uint8_t pub[32], std::string mnemonic){
+    (void)rng; (void)tid;
+    uint8_t addr[36];
+    uint64_t total = (uint64_t)1 << 32;
+    for (uint64_t s = (uint64_t)tid; s < total; s += (uint64_t)nthreads){
+        if (g_stop.load()) return;
+        if (o.maxTries && g_attempts.load(std::memory_order_relaxed) >= o.maxTries){ g_stop = true; return; }
+        wallet_address(pub, (uint32_t)s, o.testnet, addr);
+        if (addr_matches(addr, o.pattern, o.matchStart, o.ci)){
+            report_found(o, f, mnemonic, (uint32_t)s, pub, addr);
+            return;
+        }
+        g_attempts.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+static void worker_phrase(const Options &o, Found &f, Rng &rng, int tid, int nthreads){
+    (void)tid; (void)nthreads;
+    const bool ton = (o.scheme == "ton");
+    int entBytes = bip39_ent_bytes(o.words);   // 12 words -> 16, 24 words -> 32
+    while (!g_stop.load()){
+        if (o.maxTries && g_attempts.load(std::memory_order_relaxed) >= o.maxTries){ g_stop = true; return; }
+        std::string m;
+        if (ton){
+            // any random words from the list, retried until the TON validity
+            // test passes (isBasicSeed, ~1/256)
+            uint8_t entropy[64];
+            for (;;){
+                m.clear();
+                uint8_t b[4];
+                for (int i = 0; i < o.words; i++){
+                    rng.fill(b, 4);
+                    uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                                 ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+                    if (i) m += ' ';
+                    m += BIP39_ENGLISH[v % 2048u];
+                }
+                ton_entropy(m, entropy);
+                if (ton_is_basic_seed(entropy)) break;
+            }
+        } else {
+            uint8_t ent[32];
+            rng.fill(ent, entBytes);
+            bip39_from_entropy(ent, entBytes, m);
+        }
+        uint8_t sec[32];
+        if (ton) ton_derive_secret(m, sec); else app_derive_secret(m, sec);
+        uint8_t pub[32]; ed25519_pubkey(pub, sec);
+        uint8_t addr[36];
+        wallet_address(pub, o.subwalletId, o.testnet, addr);
+        memset(sec, 0, sizeof(sec));
+        if (addr_matches(addr, o.pattern, o.matchStart, o.ci)){
+            report_found(o, f, m, o.subwalletId, pub, addr);
+            return;
+        }
+        g_attempts.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+static double expected_attempts(const std::string &pat, bool ci){
+    double e = 1.0;
+    for (char c : pat){
+        if (ci && std::isalpha((unsigned char)c)) e *= 32.0;
+        else e *= 64.0;
+    }
+    return e;
+}
+
+static void progress_loop(const Options &o, std::chrono::steady_clock::time_point t0){
+    double exp_tries = expected_attempts(o.pattern, o.ci);
+    uint64_t last = 0;
+    auto lastT = std::chrono::steady_clock::now();
+    while (!g_stop.load()){
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        if (g_stop.load()) break;
+        uint64_t cur = g_attempts.load();
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - lastT).count();
+        double rate = dt > 0 ? (double)(cur - last) / dt : 0;
+        last = cur; lastT = now;
+        double elapsed = std::chrono::duration<double>(now - t0).count();
+        double p = 1.0 - exp(-(double)cur / exp_tries);
+        double eta = rate > 0 ? (exp_tries - (double)cur) / rate : 0;
+        if (eta < 0) eta = 0;
+        char etabuf[32];
+        if (rate <= 0) snprintf(etabuf, sizeof(etabuf), "??");
+        else snprintf(etabuf, sizeof(etabuf), "%.0fs", eta);
+        printf("\r  %12llu tries  %9.0f/s  %7.0fs  p~%5.1f%%  ETA %s      ",
+               (unsigned long long)cur, rate, elapsed, p * 100.0, etabuf);
+        fflush(stdout);
+    }
+    printf("\r%-90s\r", "");
+}
+
+// ===========================================================================
+//  Main
+// ===========================================================================
+static void benchmark(){
+    auto clk = []{ return std::chrono::steady_clock::now(); };
+    uint8_t d[64], pk[32], seed[32] = {0};
+    auto rate = [](int n, std::chrono::steady_clock::time_point a,
+                   std::chrono::steady_clock::time_point b){
+        return n / std::chrono::duration<double>(b - a).count();
+    };
+
+    int N = 400000; auto a = clk();
+    for (int i = 0; i < N; i++){ d[0] = (uint8_t)i; sha256(d, 32, d); }
+    auto b = clk();
+    printf("sha256          : %12.0f/s\n", rate(N, a, b));
+
+    N = 400000; a = clk();
+    for (int i = 0; i < N; i++){ d[0] = (uint8_t)i; sha512(d, 32, d); }
+    b = clk();
+    printf("sha512          : %12.0f/s\n", rate(N, a, b));
+
+    N = 20000; a = clk();
+    for (int i = 0; i < N; i++){ seed[0] = (uint8_t)i; ed25519_pubkey(pk, seed); }
+    b = clk();
+    printf("ed25519 pubkey  : %12.0f/s\n", rate(N, a, b));
+
+    N = 2000; a = clk();
+    for (int i = 0; i < N; i++){
+        std::string m; uint8_t ent[16] = {1,2,3,4,5,6,7,8,9,10,11,(uint8_t)i,13,14,15,16};
+        bip39_from_entropy(ent, 16, m);
+        uint8_t sec[32]; app_derive_secret(m, sec);
+        ed25519_pubkey(pk, sec);
+        uint8_t addr[36]; wallet_address(pk, 0x7FFF7F11u, false, addr);
+    }
+    b = clk();
+    printf("phrase attempt  : %12.0f/s\n", rate(N, a, b));
+
+    N = 2000000; a = clk();
+    for (int i = 0; i < N; i++){ uint8_t addr[36]; wallet_address(pk, (uint32_t)i, false, addr); }
+    b = clk();
+    printf("subwallet try   : %12.0f/s\n", rate(N, a, b));
+}
+
+} // namespace
+
+static void usage(const char *prog){
+    printf(
+"vanity_tg - offline vanity address miner for Telegram Wallet (WalletTg)\n\n"
+"Usage: %s (--suffix STR | --prefix STR) [options]\n\n"
+"Match:\n"
+"  --suffix STR       require the address to end with STR (default mode)\n"
+"  --prefix STR       require STR right after the \"UQ\"/\"EQ\" tag (index 2)\n"
+"  --at N             match STR at base64 index N instead\n"
+"  --ci               case-insensitive matching\n"
+"\n"
+"Search mode:\n"
+"  --mode phrase      vary the mnemonic (default). Slower; the address follows the\n"
+"                     words, so importing the phrase into Telegram gives the SAME address.\n"
+"  --mode subwallet   vary subwalletId only (fast, ~2^32 tries per key). The address\n"
+"                     is NOT reproducible by Telegram without the same subwalletId.\n"
+"\n"
+"Derivation scheme:\n"
+"  --scheme app       vanity.tg scheme (default): PBKDF2(salt=\"mnemonic\") + SLIP-0010\n"
+"                      m/44'/607'/0' + ed25519. Matches Telegram Wallet on import.\n"
+"  --scheme ton       TON-native scheme (@ton/crypto mnemonicToPrivateKey):\n"
+"                      24-word phrase importable into standard TON wallets\n"
+"\n"
+"Other:\n"
+"  --words 12|24      mnemonic length for phrase mode (default 12)\n"
+"  --threads N        worker threads (default: CPU count)\n"
+"  --mnemonic \"...\"   use a fixed mnemonic (subwallet mode)\n"
+"  --subwallet HEX    fixed subwallet id (default 0x7FFF7F11 mainnet)\n"
+"  --testnet          testnet (subwallet 0x7FFF7F7D, tag 0xD1)\n"
+"  --max-tries N      stop after N attempts\n"
+"  --quiet            less output\n"
+"  --bench            measure hash/derivation throughput and exit\n"
+"  --selftest         run built-in self-tests and exit\n"
+"  --wizard           interactive prompt (used automatically on double-click)\n"
+"  --help             this text\n",
+        prog);
+}
+
+static int run_main(int argc, char **argv){
+    Options o;
+    std::vector<std::string> args(argv + 1, argv + argc);
+
+    auto need = [&](size_t &i) -> std::string {
+        if (i + 1 >= args.size()){ fprintf(stderr, "missing value for %s\n", args[i].c_str()); exit(2); }
+        return args[++i];
+    };
+
+    for (size_t i = 0; i < args.size(); i++){
+        const std::string &a = args[i];
+        if      (a == "--help" || a == "-h"){ usage(argv[0]); return 0; }
+        else if (a == "--selftest")          o.selftest = true;
+        else if (a == "--bench")             o.bench = true;
+        else if (a == "--suffix")            o.suffix = need(i);
+        else if (a == "--prefix")            o.prefix = need(i);
+        else if (a == "--at")                { o.matchStart = atoi(need(i).c_str()); o.atGiven = true; }
+        else if (a == "--ci")                o.ci = true;
+        else if (a == "--mode")              o.mode = need(i);
+        else if (a == "--scheme")            o.scheme = need(i);
+        else if (a == "--words")             o.words = atoi(need(i).c_str());
+        else if (a == "--threads" || a == "--jobs") o.threads = atoi(need(i).c_str());
+        else if (a == "--mnemonic")          o.mnemonic = need(i);
+        else if (a == "--subwallet")         { o.subwalletId = (uint32_t)strtoul(need(i).c_str(), nullptr, 0); o.haveSubwallet = true; }
+        else if (a == "--testnet")           o.testnet = true;
+        else if (a == "--max-tries")         o.maxTries = strtoull(need(i).c_str(), nullptr, 0);
+        else if (a == "--quiet")             o.quiet = true;
+        else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+
+    wallet_init_code_hash();
+    if (o.selftest) return selftest() ? 0 : 1;
+    if (o.bench){ benchmark(); return 0; }
+
+    if (o.suffix.empty() && o.prefix.empty()){
+        fprintf(stderr, "error: specify --suffix STR or --prefix STR\n\n");
+        usage(argv[0]); return 2;
+    }
+    if (o.mode != "phrase" && o.mode != "subwallet"){
+        fprintf(stderr, "error: --mode must be 'phrase' or 'subwallet'\n"); return 2;
+    }
+    if (o.scheme != "app" && o.scheme != "ton"){
+        fprintf(stderr, "error: --scheme must be 'app' (vanity.tg) or 'ton' (native)\n"); return 2;
+    }
+    if (o.words != 12 && o.words != 24){
+        fprintf(stderr, "error: --words must be 12 or 24\n"); return 2;
+    }
+
+    // resolve the matched fragment
+    if (!o.suffix.empty()){ o.pattern = o.suffix; if (!o.atGiven) o.matchStart = 48 - (int)o.suffix.size(); }
+    else                  { o.pattern = o.prefix; if (!o.atGiven) o.matchStart = 2; }
+    if (o.matchStart < 0) o.matchStart = 0;
+    if (o.matchStart + (int)o.pattern.size() > 48){
+        fprintf(stderr, "error: pattern does not fit in a 48-char address\n"); return 2;
+    }
+    for (char c : o.pattern){
+        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_')){
+            fprintf(stderr, "error: '%c' is not a base64url character (A-Za-z0-9-_)\n", c);
+            return 2;
+        }
+    }
+
+    if (o.testnet && !o.haveSubwallet) o.subwalletId = 0x7FFF7F7Du;
+
+    int nthreads = o.threads > 0 ? o.threads : (int)std::thread::hardware_concurrency();
+    if (nthreads <= 0) nthreads = 1;
+
+    printf("vanity_tg  |  mode=%s  scheme=%s  match=%s  start=%d  ci=%d  threads=%d%s\n",
+           o.mode.c_str(), o.scheme.c_str(), o.pattern.c_str(), o.matchStart, (int)o.ci, nthreads,
+           o.testnet ? "  [testnet]" : "");
+    {
+        double e = expected_attempts(o.pattern, o.ci);
+        printf("expected ~%.3g attempts for this pattern\n\n", e);
+    }
+
+    Found found;
+    auto t0 = std::chrono::steady_clock::now();
+
+    // ---- prepare the fixed key material -----------------------------------
+    uint8_t fixedPub[32];
+    std::string fixedMnemonic = o.mnemonic;
+
+    if (o.mode == "subwallet"){
+        if (fixedMnemonic.empty()){
+            Rng r; r.seed();
+            if (o.scheme == "ton"){
+                uint8_t entropy[64];
+                for (;;){
+                    fixedMnemonic.clear();
+                    uint8_t b[4];
+                    for (int i = 0; i < o.words; i++){
+                        r.fill(b, 4);
+                        uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                                     ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+                        if (i) fixedMnemonic += ' ';
+                        fixedMnemonic += BIP39_ENGLISH[v % 2048u];
+                    }
+                    ton_entropy(fixedMnemonic, entropy);
+                    if (ton_is_basic_seed(entropy)) break;
+                }
+            } else {
+                int entBytes = bip39_ent_bytes(o.words);
+                uint8_t ent[32]; r.fill(ent, entBytes);
+                bip39_from_entropy(ent, entBytes, fixedMnemonic);
+            }
+        }
+        uint8_t sec[32];
+        if (o.scheme == "ton") ton_derive_secret(fixedMnemonic, sec);
+        else                   app_derive_secret(fixedMnemonic, sec);
+        ed25519_pubkey(fixedPub, sec);
+        memset(sec, 0, sizeof(sec));
+        printf("fixed mnemonic : %s\n", fixedMnemonic.c_str());
+        { std::string h; to_hex(fixedPub, 32, h); printf("fixed pubkey   : %s\n", h.c_str()); }
+        printf("searching subwalletId in [0, 2^32) ...\n\n");
+    } else {
+        printf("searching %s mnemonics (subwalletId = 0x%08X) ...\n\n",
+               o.scheme == "ton" ? "TON" : "BIP39/vanity.tg", o.subwalletId);
+    }
+
+    // ---- progress thread ---------------------------------------------------
+    std::thread prog;
+    if (!o.quiet) prog = std::thread(progress_loop, std::cref(o), t0);
+
+    // ---- workers -----------------------------------------------------------
+    std::vector<std::thread> workers;
+    std::vector<Rng> rngs(nthreads);
+    for (int t = 0; t < nthreads; t++){
+        rngs[t].seed();
+        rngs[t].seed(); // discard first keystream block
+    }
+    for (int t = 0; t < nthreads; t++){
+        if (o.mode == "subwallet")
+            workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                 t, nthreads, fixedPub, fixedMnemonic);
+        else
+            workers.emplace_back(worker_phrase, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                 t, nthreads);
+    }
+    for (auto &w : workers) w.join();
+    g_stop = true;
+    if (prog.joinable()) prog.join();
+
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    if (!found.ok.load()){
+        printf("no match found after %llu tries (%.1fs)\n",
+               (unsigned long long)g_attempts.load(), elapsed);
+        return 1;
+    }
+
+    std::string addr, raw;
+    addr_to_string(found.addr, addr);
+    raw_address_string(found.addr, raw);
+    std::string pubh; to_hex(found.pubkey, 32, pubh);
+
+    printf("\n=== FOUND ===\n");
+    printf("  address     : %s\n", addr.c_str());
+    printf("  raw         : %s\n", raw.c_str());
+    printf("  subwalletId : 0x%08X (%u)\n", found.subwalletId, found.subwalletId);
+    printf("  public key  : %s\n", pubh.c_str());
+    if (o.mode == "phrase" || !fixedMnemonic.empty())
+        printf("  mnemonic    : %s\n", found.mnemonic.c_str());
+    printf("  attempts    : %llu\n", (unsigned long long)found.attempts);
+    printf("  elapsed     : %.1fs\n", elapsed);
+    printf("\n");
+    // ---- importability check ------------------------------------------------
+    const uint32_t netDefault = o.testnet ? 0x7FFF7F7Du : 0x7FFF7F11u;
+    const bool standardSubwallet = (found.subwalletId == netDefault);
+
+    printf("--- IMPORT CHECK (will the wallet show this address?) ---\n");
+    if (o.testnet)
+        printf("  network  : TESTNET (only a testnet wallet would match)\n");
+
+    if (standardSubwallet && o.scheme == "app"){
+        printf("  RESULT   : YES - import this phrase into Telegram Wallet (@wallet) and it\n");
+        printf("             will show THIS address:\n");
+        printf("               * standard subwalletId 0x%08X\n", found.subwalletId);
+        printf("               * vanity.tg derivation (PBKDF2 + SLIP-0010 m/44'/607'/0')\n");
+    } else if (standardSubwallet){
+        printf("  RESULT   : YES for TON-native wallets (Tonkeeper etc.) - standard\n");
+        printf("             subwalletId 0x%08X + @ton/crypto mnemonicToPrivateKey.\n", found.subwalletId);
+        printf("             In Telegram Wallet: check the address BEFORE funding.\n");
+    } else {
+        printf("  RESULT   : NO  - subwalletId 0x%08X is CUSTOM, so a standard client\n", found.subwalletId);
+        printf("             (Telegram Wallet) would show a DIFFERENT address for this phrase.\n");
+        printf("             Tip: re-run in phrase mode (--mode phrase) - there the words\n");
+        printf("                  control the address and Telegram reproduces it exactly.\n");
+    }
+    printf("  Reminder : verify on-chain (address -> public key) before funding.\n");
+    return 0;
+}
+
+// ===========================================================================
+//  Entry point: when the .exe is started by double-click (no arguments),
+//  run a tiny interactive wizard so the user does not need the command line.
+// ===========================================================================
+static std::string read_line(const char *prompt){
+    printf("%s", prompt); fflush(stdout);
+    char buf[512];
+    if (!fgets(buf, sizeof(buf), stdin)) return std::string();
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' ||
+                          s.back() == ' '  || s.back() == '\t')) s.pop_back();
+    size_t i = 0; while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+    return s.substr(i);
+}
+
+static int interactive_wizard(){
+    printf("\n=== vanity_tg - beauty address for WalletTg ===\n\n");
+    printf("Addresses look like:  UQ................................zz\n\n");
+
+    std::string suf = read_line("Desired ending of the address (e.g. TG): ");
+    if (suf.empty()){ printf("Nothing entered - exiting.\n"); return 1; }
+
+    printf("\nMode:\n");
+    printf("  1) usable (recommended) - phrase mode: the words themselves control the\n");
+    printf("     address, so Telegram shows the SAME address after you import them\n");
+    printf("  2) fast   - subwallet mode: takes seconds, but Telegram will show a\n");
+    printf("     DIFFERENT address (it would need the same custom subwalletId)\n");
+    std::string mode = read_line("Choose [1]: ");
+    const char *m = (mode == "2") ? "subwallet" : "phrase";
+
+    printf("\nStarting...\n\n");
+    std::vector<std::string> a = { "vanity_tg", "--mode", m, "--suffix", suf };
+    std::vector<char *> av;
+    for (auto &x : a) av.push_back(const_cast<char *>(x.c_str()));
+    return run_main((int)av.size(), av.data());
+}
+
+int main(int argc, char **argv){
+    const bool interactive = launched_by_double_click();
+
+    int rc;
+    if ((argc == 2 && std::string(argv[1]) == "--wizard") || (interactive && argc == 1))
+        rc = interactive_wizard();
+    else
+        rc = run_main(argc, argv);
+
+    if (interactive){
+        printf("\nPress Enter to exit...");
+        fflush(stdout);
+        (void)getchar();
+    }
+    return rc;
+}
