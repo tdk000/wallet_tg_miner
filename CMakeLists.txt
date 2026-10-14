@@ -13,6 +13,7 @@ find_package(Threads REQUIRED)
 
 add_executable(wallet_tg_miner
   wallet_tg_miner.cpp
+  gpu_opencl.cpp
   monocypher.c
 )
 
@@ -20,6 +21,9 @@ target_link_libraries(wallet_tg_miner PRIVATE Threads::Threads)
 
 if(WIN32)
   target_link_libraries(wallet_tg_miner PRIVATE advapi32)
+else()
+  # Linux needs -ldl for dlopen; on macOS CMAKE_DL_LIBS is empty.
+  target_link_libraries(wallet_tg_miner PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 # Optional: build with zig for a fully static, dependency-free binary.

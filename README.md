@@ -19,9 +19,14 @@
 | `bip39_english.h`  | Английский словарь BIP39 (2048 слов), сгенерирован автоматически  |
 | `monocypher.c`     | Vendored-криптография (CC0 / BSD-2-Clause) — групповые операции кривой для ed25519 |
 | `monocypher.h`     | Заголовок Monocypher                                              |
+| `ocl.h`            | Минимальные объявления OpenCL (грузится в рантайме из `OpenCL.dll` / `libOpenCL.so`, SDK не нужен) |
+| `gpu_opencl.cpp`   | Хост-часть OpenCL: поиск устройства, сборка программы, запуск ядра пачками |
+| `gpu_opencl.h`     | Интерфейс GPU-движка (`gpu::probe`, `gpu::AppDeriver`)            |
+| `gpu_kernels.h`    | Исходник OpenCL-ядра (PBKDF2 + SLIP-0010), вшит в бинарник        |
 | `Makefile`, `CMakeLists.txt`, `build.bat`, `build.sh` | Скрипты сборки                     |
 
 Внешних зависимостей нет: ни OpenSSL, ни libsodium, ни Boost не нужны.
+GPU-путь **опционален**: если OpenCL нет, программа молча работает на CPU.
 
 ---
 
@@ -33,23 +38,25 @@
 
 ```bash
 zig cc -O3 -c monocypher.c -o monocypher.o
+zig c++ -std=c++17 -O3 -c gpu_opencl.cpp -o gpu_opencl.o
 zig c++ -std=c++17 -O3 -c wallet_tg_miner.cpp -o wallet_tg_miner.o
-zig c++ -O3 wallet_tg_miner.o monocypher.o -o wallet_tg_miner.exe -ladvapi32   # Windows
-zig c++ -O3 wallet_tg_miner.o monocypher.o -o wallet_tg_miner -pthread         # Linux
+zig c++ -O3 wallet_tg_miner.o gpu_opencl.o monocypher.o -o wallet_tg_miner.exe -ladvapi32      # Windows
+zig c++ -O3 wallet_tg_miner.o gpu_opencl.o monocypher.o -o wallet_tg_miner -pthread -ldl      # Linux
 ```
 
 ### Вариант B. GCC / Clang (Linux, macOS, MinGW)
 
 ```bash
-g++ -std=c++17 -O3 -pthread wallet_tg_miner.cpp monocypher.c -o wallet_tg_miner
+g++ -std=c++17 -O3 -pthread wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c -o wallet_tg_miner -ldl
 ```
 
-На Windows с MinGW добавьте `-ladvapi32`.
+На Linux флаг `-ldl` нужен для `dlopen` (на glibc ≥ 2.34 не обязателен),
+на macOS он не нужен вовсе. На Windows с MinGW добавьте `-ladvapi32`.
 
 ### Вариант C. MSVC (Visual Studio)
 
 ```bat
-cl /nologo /std:c++17 /O2 /EHsc wallet_tg_miner.cpp monocypher.c /Fe:wallet_tg_miner.exe advapi32.lib
+cl /nologo /std:c++17 /O2 /EHsc wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c /Fe:wallet_tg_miner.exe advapi32.lib
 ```
 
 ### Вариант D. Make / CMake
@@ -129,6 +136,10 @@ wallet_tg_miner --mode subwallet --suffix TG
 | `--quiet`       | не печатать прогресс |
 | `--bench`       | замерить скорость хеширования и выйти |
 | `--selftest`    | прогнать встроенные тест-векторы и выйти |
+| `--gpu`         | считать PBKDF2 + SLIP-0010 на GPU (режим `phrase`, схема `app`, 12 слов). Без OpenCL — автоматический откат на CPU |
+| `--no-gpu`      | отключить GPU (GPU включается только явным `--gpu`) |
+| `--gpu-info`    | показать найденное OpenCL-устройство и выйти |
+| `--gpu-test`    | сверить GPU-деривацию с CPU и выйти |
 | `--wizard`      | интерактивный мастер (запускается сам при двойном клике) |
 
 Допустимые символы шаблона — алфавит base64url: `A-Z a-z 0-9 - _`.
@@ -225,7 +236,8 @@ friendly = base64url( tag:u8 | workchain:i8 | hash:256 | crc16:u16 )
 
 (Скорости — на 4-ядерном AMD A8-6600K; на современном CPU в разы быстрее.
 Схема `ton` в режиме `phrase` резко медленнее из-за PBKDF2 на 100 000
-итераций и обязательной проверки «валидности» TON-мнемоники.)
+итераций и обязательной проверки «валидности» TON-мнемоники. С `--gpu`
+строка `phrase`/`app` ускоряется ещё примерно в 30× — см. §7.1.)
 
 ---
 
@@ -252,16 +264,50 @@ friendly = base64url( tag:u8 | workchain:i8 | hash:256 | crc16:u16 )
 ## 7. Производительность (`--bench`)
 
 ```
-sha256          :      2105098/s
-sha512          :      1529493/s
-ed25519 pubkey  :         7433/s
-phrase attempt  :          190/s   (на ядро)
-subwallet try   :       521002/s   (на ядро)
+sha256          :      2022705/s
+sha512          :      1536328/s
+ed25519 pubkey  :         7061/s
+phrase attempt  :          178/s   (на ядро)
+subwallet try   :       449121/s   (на ядро)
+gpu pbkdf2+slip :         5432/s   (gfx803)
 ```
 
 `phrase`-режим упирается в PBKDF2 (2048 итераций) — это ожидаемо и
 совпадает с оценкой ≈`64^N`. Для длинных шаблонов используйте
-`--mode subwallet` или GPU/ферму.
+`--mode subwallet` или GPU.
+
+### 7.1. GPU-ускорение (OpenCL)
+
+`--gpu` переносит самую дорогую часть деривации — `PBKDF2-HMAC-SHA512`
+(2048 итераций) и `SLIP-0010` (`m/44'/607'/0'`) — на видеокарту.
+Публичный ключ ed25519 и хеш адреса TON остаются на CPU: это дешёвые
+шаги, и их считают несколько потоков параллельно.
+
+* **SDK не нужен.** OpenCL-рантайм (`OpenCL.dll` на Windows,
+  `libOpenCL.so` на Linux, `OpenCL.framework` на macOS) подгружается
+  динамически во время работы. Ни заголовков, ни `.lib` при сборке.
+* **Автооткат.** Если OpenCL или драйвера нет, `--gpu` тихо возвращается
+  на CPU — программа не падает из-за отсутствия GPU.
+* **Корректность.** Ядро побайтово повторяет CPU-деривацию; `--gpu-test`
+  сверяет GPU и CPU на наборе мнемоник и печатает `[ok]`. Стоит запустить
+  один раз после смены драйвера.
+* **Только `phrase` + `app` + 12 слов.** В остальных комбинациях
+  (24 слова, схема `ton`, режим `subwallet`) работает обычный CPU-путь.
+
+```bash
+wallet_tg_miner --gpu-info              # показать найденную карту
+wallet_tg_miner --gpu-test              # сверить GPU с CPU
+wallet_tg_miner --gpu --suffix TG       # поиск с ускорением
+```
+
+На **AMD Radeon RX 550** (gfx803, AMD-APP 3584.0) выходит ≈**5400
+дериваций/с** против ≈178/с на одном ядре CPU — примерно **30×**. Потолок
+упирается в ed25519 на CPU и в 64-битную арифметику SHA-512 на бюджетном
+gfx803 (там она эмулируется).
+
+> Каждый старт с `--gpu` драйвер компилирует OpenCL-ядро: ≈10 с на gfx803.
+> Для длительного перебора это разовые издержки. `--gpu-info` не требует
+> сборки и отвечает мгновенно.
 
 ---
 
