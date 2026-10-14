@@ -46,6 +46,7 @@
 
 #include "monocypher.h"
 #include "bip39_english.h"
+#include "gpu_opencl.h"
 
 // ===========================================================================
 //  Platform entropy (used only to seed the per-thread ChaCha20 DRBG)
@@ -601,6 +602,9 @@ struct Options {
     bool quiet = false;
     bool selftest = false;
     bool bench = false;
+    bool gpu = false;                // use OpenCL if available (phrase mode)
+    bool gpuInfo = false;
+    bool gpuTest = false;
     std::string pattern;
 };
 
@@ -818,6 +822,123 @@ static void worker_phrase(const Options &o, Found &f, Rng &rng, int tid, int nth
     }
 }
 
+// ---------------------------------------------------------------------------
+//  GPU phrase worker.
+//
+//  The GPU derives the 32-byte `app` secret (PBKDF2 + SLIP-0010 -- the part
+//  that dominates the CPU cost); the CPU pool then derives the ed25519 public
+//  key and the TON address for every secret in the batch.  Returns false only
+//  if the GPU path could not be used, in which case the caller falls back to
+//  the plain CPU worker.
+// ---------------------------------------------------------------------------
+static bool gpu_phrase_search(const Options &o, Found &f, int nthreads){
+    gpu::AppDeriver der;
+    std::string err;
+    if (!der.init(&err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return false; }
+
+    if (!o.quiet){
+        const gpu::Info &gi = der.info();
+        printf("gpu        : %s (%s), %u CU, %s\n",
+               gi.device.c_str(), gi.vendor.c_str(), gi.computeUnits, gi.version.c_str());
+    }
+
+    const size_t B = (size_t)1 << 16;
+    const int entBytes = bip39_ent_bytes(o.words);
+    const int nt = nthreads < 1 ? 1 : nthreads;
+
+    Rng rng; rng.seed(); rng.seed();
+    std::vector<std::string> mn; mn.reserve(B);
+    std::vector<uint8_t> sec;
+
+    while (!g_stop.load()){
+        if (o.maxTries && g_attempts.load(std::memory_order_relaxed) >= o.maxTries){ g_stop = true; break; }
+
+        mn.clear();
+        for (size_t i = 0; i < B && !g_stop.load(); i++){
+            uint8_t ent[32];
+            rng.fill(ent, entBytes);
+            std::string m;
+            bip39_from_entropy(ent, entBytes, m);
+            mn.push_back(std::move(m));
+        }
+        if (mn.empty()) break;
+
+        if (!der.derive(mn, sec, &err)){
+            fprintf(stderr, "[gpu] %s\n", err.c_str());
+            return false;
+        }
+
+        const size_t n = mn.size();
+        std::atomic<size_t> next{0};
+        auto job = [&](){
+            uint8_t pub[32], addr[36];
+            for (;;){
+                size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= n || g_stop.load()) break;
+                const uint8_t *s = &sec[i * 32];
+                ed25519_pubkey(pub, s);
+                wallet_address(pub, o.subwalletId, o.testnet, addr);
+                if (addr_matches(addr, o.pattern, o.matchStart, o.ci)){
+                    report_found(o, f, mn[i], o.subwalletId, pub, addr);
+                    return;
+                }
+                g_attempts.fetch_add(1, std::memory_order_relaxed);
+            }
+        };
+        if (nt == 1){
+            job();
+        } else {
+            std::vector<std::thread> ts;
+            for (int t = 0; t < nt; t++) ts.emplace_back(job);
+            for (auto &t : ts) t.join();
+        }
+        if (f.ok.load()) g_stop = true;
+    }
+    return true;
+}
+
+// Compare GPU and CPU derivations on a handful of mnemonics.
+static int gpu_selftest(){
+    gpu::Info info = gpu::probe();
+    if (!info.ok){ printf("OpenCL: not available (%s)\n", info.error.c_str()); return 0; }
+    printf("OpenCL platform : %s\n", info.platform.c_str());
+    printf("OpenCL device   : %s (%s)\n", info.device.c_str(), info.vendor.c_str());
+    printf("driver/version  : %s / %s\n", info.driver.c_str(), info.version.c_str());
+    printf("compute units   : %u   global memory: %.0f MB\n\n",
+           info.computeUnits, info.globalMem / 1048576.0);
+
+    gpu::AppDeriver der; std::string err;
+    if (!der.init(&err)){ printf("[FAIL] gpu init: %s\n", err.c_str()); return 1; }
+
+    Rng r; r.seed(); r.seed();
+    std::vector<std::string> mn;
+    mn.push_back("abandon abandon abandon abandon abandon abandon "
+                 "abandon abandon abandon abandon abandon about");
+    for (int i = 0; i < 15; i++){
+        uint8_t ent[16]; r.fill(ent, 16);
+        std::string m; bip39_from_entropy(ent, 16, m);
+        mn.push_back(std::move(m));
+    }
+
+    std::vector<uint8_t> sec;
+    auto t0 = std::chrono::steady_clock::now();
+    if (!der.derive(mn, sec, &err)){ printf("[FAIL] gpu derive: %s\n", err.c_str()); return 1; }
+    auto t1 = std::chrono::steady_clock::now();
+
+    int fail = 0;
+    for (size_t i = 0; i < mn.size(); i++){
+        uint8_t ref[32]; app_derive_secret(mn[i], ref);
+        if (memcmp(ref, &sec[i * 32], 32) != 0){
+            std::string a, b; to_hex(ref, 32, a); to_hex(&sec[i * 32], 32, b);
+            printf("[FAIL] gpu != cpu on mnemonic #%zu\n  cpu=%s\n  gpu=%s\n", i, a.c_str(), b.c_str());
+            fail++;
+        }
+    }
+    double ms = std::chrono::duration<double>(t1 - t0).count() * 1000.0;
+    if (!fail) printf("[ok]   GPU matches CPU on %zu mnemonics (%.1f ms)\n", mn.size(), ms);
+    return fail ? 1 : 0;
+}
+
 static double expected_attempts(const std::string &pat, bool ci){
     double e = 1.0;
     for (char c : pat){
@@ -894,6 +1015,29 @@ static void benchmark(){
     for (int i = 0; i < N; i++){ uint8_t addr[36]; wallet_address(pk, (uint32_t)i, false, addr); }
     b = clk();
     printf("subwallet try   : %12.0f/s\n", rate(N, a, b));
+
+    // optional: OpenCL throughput for PBKDF2 + SLIP-0010
+    {
+        gpu::AppDeriver der; std::string err;
+        if (der.init(&err)){
+            std::vector<std::string> mn; mn.reserve(4096);
+            Rng r; r.seed(); r.seed();
+            for (int i = 0; i < 4096; i++){
+                uint8_t ent[16]; r.fill(ent, 16); std::string m;
+                bip39_from_entropy(ent, 16, m); mn.push_back(std::move(m));
+            }
+            std::vector<uint8_t> sec;
+            der.derive(mn, sec, &err);            // warm-up
+            const int R = 8;
+            auto g0 = clk();
+            for (int i = 0; i < R; i++) der.derive(mn, sec, &err);
+            auto g1 = clk();
+            printf("gpu pbkdf2+slip : %12.0f/s   (%s)\n",
+                   rate((int)mn.size() * R, g0, g1), der.info().device.c_str());
+        } else {
+            printf("gpu pbkdf2+slip :      n/a   (%s)\n", err.c_str());
+        }
+    }
 }
 
 } // namespace
@@ -930,6 +1074,13 @@ static void usage(const char *prog){
 "  --quiet            less output\n"
 "  --bench            measure hash/derivation throughput and exit\n"
 "  --selftest         run built-in self-tests and exit\n"
+"\n"
+"GPU (OpenCL, optional; no SDK required):\n"
+"  --gpu              run PBKDF2/SLIP-0010 on the GPU (phrase mode, scheme app,\n"
+"                     12 words). The CPU still derives ed25519 + the address.\n"
+"                     Falls back to the CPU automatically when OpenCL is absent.\n"
+"  --gpu-info         print the detected OpenCL device and exit\n"
+"  --gpu-test         check that GPU and CPU derivations agree, then exit\n"
 "  --wizard           interactive prompt (used automatically on double-click)\n"
 "  --help             this text\n",
         prog);
@@ -962,11 +1113,29 @@ static int run_main(int argc, char **argv){
         else if (a == "--testnet")           o.testnet = true;
         else if (a == "--max-tries")         o.maxTries = strtoull(need(i).c_str(), nullptr, 0);
         else if (a == "--quiet")             o.quiet = true;
+        else if (a == "--gpu")               o.gpu = true;
+        else if (a == "--no-gpu")            o.gpu = false;
+        else if (a == "--gpu-info")          o.gpuInfo = true;
+        else if (a == "--gpu-test")          o.gpuTest = true;
         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 2; }
     }
 
     wallet_init_code_hash();
     if (o.selftest) return selftest() ? 0 : 1;
+    if (o.gpuTest)  return gpu_selftest();
+    if (o.gpuInfo){
+        gpu::Info gi = gpu::probe();
+        if (!gi.ok){ printf("OpenCL: not available (%s)\n", gi.error.c_str()); return 1; }
+        printf("platform       : %s\n", gi.platform.c_str());
+        printf("device         : %s\n", gi.device.c_str());
+        printf("vendor         : %s\n", gi.vendor.c_str());
+        printf("driver         : %s\n", gi.driver.c_str());
+        printf("device version : %s\n", gi.version.c_str());
+        printf("compute units  : %u\n", gi.computeUnits);
+        printf("global memory  : %.0f MB\n", gi.globalMem / 1048576.0);
+        printf("max work-group : %zu\n", gi.maxWorkGroup);
+        return 0;
+    }
     if (o.bench){ benchmark(); return 0; }
 
     if (o.suffix.empty() && o.prefix.empty()){
@@ -1065,15 +1234,22 @@ static int run_main(int argc, char **argv){
         rngs[t].seed();
         rngs[t].seed(); // discard first keystream block
     }
-    for (int t = 0; t < nthreads; t++){
-        if (o.mode == "subwallet")
-            workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
-                                 t, nthreads, fixedPub, fixedMnemonic);
-        else
-            workers.emplace_back(worker_phrase, std::cref(o), std::ref(found), std::ref(rngs[t]),
-                                 t, nthreads);
+
+    bool ranOnGpu = false;
+    if (o.mode == "phrase" && o.gpu && o.scheme == "app" && o.words == 12 && fixedMnemonic.empty())
+        ranOnGpu = gpu_phrase_search(o, found, nthreads);
+
+    if (!ranOnGpu){
+        for (int t = 0; t < nthreads; t++){
+            if (o.mode == "subwallet")
+                workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                     t, nthreads, fixedPub, fixedMnemonic);
+            else
+                workers.emplace_back(worker_phrase, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                     t, nthreads);
+        }
+        for (auto &w : workers) w.join();
     }
-    for (auto &w : workers) w.join();
     g_stop = true;
     if (prog.joinable()) prog.join();
 
