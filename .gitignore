@@ -1,0 +1,11 @@
+# build artifacts
+*.o
+*.obj
+*.exe
+*.out
+vanity_tg
+build/
+
+# cross-compiled binaries / archives
+dist/
+*.zip
