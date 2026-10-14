@@ -10,14 +10,18 @@ echo   ---------------------------------------------------
 echo.
 echo     1.  Quick search  (subwallet mode, fast)
 echo     2.  Mnemonic search (phrase mode, slow)
-echo     3.  Self-test
+echo     3.  Mnemonic search (phrase mode, GPU if available)
+echo     4.  GPU info / self-test of the GPU path
+echo     5.  Self-test
 echo     0.  Exit
 echo.
 set "CH="
-set /p CH=Choose [0-3]: 
+set /p CH=Choose [0-5]: 
 if "%CH%"=="1" goto quick
 if "%CH%"=="2" goto phrase
-if "%CH%"=="3" goto test
+if "%CH%"=="3" goto gpuphrase
+if "%CH%"=="4" goto gpucheck
+if "%CH%"=="5" goto test
 if "%CH%"=="0" exit /b 0
 goto menu
 
@@ -39,6 +43,26 @@ set /p SUF=Address ending (e.g. TG):
 if "%SUF%"=="" goto menu
 echo.
 wallet_tg_miner.exe --mode phrase --suffix %SUF%
+echo.
+pause
+goto menu
+
+:gpuphrase
+echo.
+set "SUF="
+set /p SUF=Address ending (e.g. TG): 
+if "%SUF%"=="" goto menu
+echo.
+wallet_tg_miner.exe --gpu --suffix %SUF%
+echo.
+pause
+goto menu
+
+:gpucheck
+echo.
+wallet_tg_miner.exe --gpu-info
+echo.
+wallet_tg_miner.exe --gpu-test
 echo.
 pause
 goto menu
