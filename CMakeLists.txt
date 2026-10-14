@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(vanity_tg LANGUAGES C CXX)
+project(wallet_tg_miner LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
@@ -11,15 +11,15 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_executable(vanity_tg
-  vanity_tg.cpp
+add_executable(wallet_tg_miner
+  wallet_tg_miner.cpp
   monocypher.c
 )
 
-target_link_libraries(vanity_tg PRIVATE Threads::Threads)
+target_link_libraries(wallet_tg_miner PRIVATE Threads::Threads)
 
 if(WIN32)
-  target_link_libraries(vanity_tg PRIVATE advapi32)
+  target_link_libraries(wallet_tg_miner PRIVATE advapi32)
 endif()
 
 # Optional: build with zig for a fully static, dependency-free binary.
