@@ -24,9 +24,28 @@ static void *lib_open() {
     if (!h) h = dlopen("libOpenCL.dylib", RTLD_NOW | RTLD_LOCAL);
     return h;
 #else
+#  if defined(__ANDROID__)
+    // Android ships the ICD as a vendor library that is not on the default
+    // search path; try the well-known locations before the generic names.
+    static const char *cands[] = {
+        "/vendor/lib64/libOpenCL.so",
+        "/vendor/lib/libOpenCL.so",
+        "/system/vendor/lib64/libOpenCL.so",
+        "/system/vendor/lib/libOpenCL.so",
+        "/system/lib64/libOpenCL.so",
+        "/system/lib/libOpenCL.so",
+        "libOpenCL.so",
+    };
+    for (const char *c : cands) {
+        void *h = dlopen(c, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return nullptr;
+#  else
     void *h = dlopen("libOpenCL.so.1", RTLD_NOW | RTLD_LOCAL);
     if (!h) h = dlopen("libOpenCL.so", RTLD_NOW | RTLD_LOCAL);
     return h;
+#  endif
 #endif
 }
 

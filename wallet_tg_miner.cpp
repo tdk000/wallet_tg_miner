@@ -47,6 +47,7 @@
 #include "monocypher.h"
 #include "bip39_english.h"
 #include "gpu_opencl.h"
+#include "miner_api.h"
 
 // ===========================================================================
 //  Platform entropy (used only to seed the per-thread ChaCha20 DRBG)
@@ -71,12 +72,15 @@
 #  include <fcntl.h>
 #  include <unistd.h>
 #  if defined(__linux__)
-#    include <sys/random.h>
+#    if !defined(__ANDROID__) || __ANDROID_API__ >= 28
+#      define WTM_HAVE_GETRANDOM 1
+#      include <sys/random.h>
+#    endif
 #  endif
    static bool os_random(void *buf, size_t len) {
        uint8_t *p = (uint8_t *)buf;
        size_t got = 0;
-#  if defined(__linux__)
+#  if defined(WTM_HAVE_GETRANDOM)
        while (got < len) {
            ssize_t n = getrandom(p + got, len - got, 0);
            if (n <= 0) break;
@@ -1040,7 +1044,207 @@ static void benchmark(){
     }
 }
 
+// ===========================================================================
+//  Search driver, shared by the CLI (run_main) and the embeddable API
+//  (wtm_run).  prepare_fixed_key() builds the key material that stays
+//  constant in subwallet mode; execute_search() runs the worker pool.
+// ===========================================================================
+static void prepare_fixed_key(const Options &o, std::string &fixedMnemonic, uint8_t fixedPub[32]){
+    fixedMnemonic = o.mnemonic;
+    if (o.mode != "subwallet") return;
+
+    if (fixedMnemonic.empty()){
+        Rng r; r.seed();
+        if (o.scheme == "ton"){
+            uint8_t entropy[64];
+            for (;;){
+                fixedMnemonic.clear();
+                uint8_t b[4];
+                for (int i = 0; i < o.words; i++){
+                    r.fill(b, 4);
+                    uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                                 ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+                    if (i) fixedMnemonic += ' ';
+                    fixedMnemonic += BIP39_ENGLISH[v % 2048u];
+                }
+                ton_entropy(fixedMnemonic, entropy);
+                if (ton_is_basic_seed(entropy)) break;
+            }
+        } else {
+            int entBytes = bip39_ent_bytes(o.words);
+            uint8_t ent[32]; r.fill(ent, entBytes);
+            bip39_from_entropy(ent, entBytes, fixedMnemonic);
+        }
+    }
+    uint8_t sec[32];
+    if (o.scheme == "ton") ton_derive_secret(fixedMnemonic, sec);
+    else                   app_derive_secret(fixedMnemonic, sec);
+    ed25519_pubkey(fixedPub, sec);
+    memset(sec, 0, sizeof(sec));
+}
+
+static void execute_search(const Options &o, int nthreads, const std::string &fixedMnemonic,
+                           const uint8_t fixedPub[32], Found &found,
+                           double &elapsed, bool &ranOnGpu){
+    g_attempts = 0;
+    g_stop = false;
+    auto t0 = std::chrono::steady_clock::now();
+
+    // ---- progress thread ---------------------------------------------------
+    std::thread prog;
+    if (!o.quiet) prog = std::thread(progress_loop, std::cref(o), t0);
+
+    // ---- workers -----------------------------------------------------------
+    std::vector<std::thread> workers;
+    std::vector<Rng> rngs(nthreads);
+    for (int t = 0; t < nthreads; t++){
+        rngs[t].seed();
+        rngs[t].seed(); // discard first keystream block
+    }
+
+    ranOnGpu = false;
+    if (o.mode == "phrase" && o.gpu && o.scheme == "app" && o.words == 12 && fixedMnemonic.empty())
+        ranOnGpu = gpu_phrase_search(o, found, nthreads);
+
+    if (!ranOnGpu){
+        for (int t = 0; t < nthreads; t++){
+            if (o.mode == "subwallet")
+                workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                     t, nthreads, fixedPub, fixedMnemonic);
+            else
+                workers.emplace_back(worker_phrase, std::cref(o), std::ref(found), std::ref(rngs[t]),
+                                     t, nthreads);
+        }
+        for (auto &w : workers) w.join();
+    }
+    g_stop = true;
+    if (prog.joinable()) prog.join();
+    elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// ===========================================================================
+//  Embeddable C API (see miner_api.h).  Implemented after the anonymous
+//  namespace, so it can reach the internal types above.
+// ===========================================================================
+static bool importable_for(const Options &o, const Found &found){
+    const uint32_t netDefault = o.testnet ? 0x7FFF7F7Du : 0x7FFF7F11u;
+    return found.subwalletId == netDefault && o.scheme == "app";
+}
+
 } // namespace
+
+extern "C" void wtm_defaults(wtm_params *p){
+    if (!p) return;
+    memset(p, 0, sizeof(*p));
+    p->mode = "phrase";
+    p->scheme = "app";
+    p->matchAt = -1;
+    p->words = 12;
+    p->threads = 0;
+    p->gpu = 0;
+}
+
+extern "C" uint64_t wtm_attempts(void){
+    return g_attempts.load(std::memory_order_relaxed);
+}
+
+extern "C" void wtm_request_stop(void){
+    g_stop = true;
+}
+
+extern "C" int wtm_selftest(void){
+    wallet_init_code_hash();
+    return selftest() ? 1 : 0;
+}
+
+extern "C" double wtm_expected_attempts(const char *pattern, int ci){
+    return expected_attempts(pattern ? std::string(pattern) : std::string(), ci != 0);
+}
+
+extern "C" int wtm_run(const wtm_params *p, wtm_result *out){
+    if (out) memset(out, 0, sizeof(*out));
+    if (!p || !out) return -1;
+
+    auto fail = [&](const char *m){
+        snprintf(out->error, sizeof(out->error), "%s", m);
+        out->found = -1;
+        return -1;
+    };
+
+    Options o;
+    o.mode   = p->mode   ? p->mode   : "phrase";
+    o.scheme = p->scheme ? p->scheme : "app";
+    o.suffix = p->suffix ? p->suffix : "";
+    o.prefix = p->prefix ? p->prefix : "";
+    o.ci     = p->ci != 0;
+    o.testnet= p->testnet != 0;
+    o.words  = p->words > 0 ? p->words : 12;
+    o.threads= p->threads;
+    o.gpu    = p->gpu != 0;
+    if (p->haveSubwallet){ o.subwalletId = p->subwalletId; o.haveSubwallet = true; }
+    if (p->mnemonic && *p->mnemonic) o.mnemonic = p->mnemonic;
+    o.quiet = true;                     // embedded: never touch the console
+
+    if (o.mode != "phrase" && o.mode != "subwallet") return fail("mode must be phrase or subwallet");
+    if (o.scheme != "app" && o.scheme != "ton")      return fail("scheme must be app or ton");
+    if (o.words != 12 && o.words != 24)              return fail("words must be 12 or 24");
+    if (o.suffix.empty() && o.prefix.empty())        return fail("specify a suffix or a prefix");
+
+    if (!o.suffix.empty()){
+        o.pattern = o.suffix;
+        o.matchStart = (p->matchAt >= 0) ? p->matchAt : (48 - (int)o.suffix.size());
+    } else {
+        o.pattern = o.prefix;
+        o.matchStart = (p->matchAt >= 0) ? p->matchAt : 2;
+    }
+    if (o.matchStart < 0) o.matchStart = 0;
+    if (o.matchStart + (int)o.pattern.size() > 48)
+        return fail("pattern does not fit in a 48-character address");
+    for (char c : o.pattern){
+        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_'))
+            return fail("pattern must be base64url (A-Za-z0-9-_)");
+    }
+    if (o.testnet && !o.haveSubwallet) o.subwalletId = 0x7FFF7F7Du;
+
+    wallet_init_code_hash();
+
+    int nthreads = o.threads > 0 ? o.threads : (int)std::thread::hardware_concurrency();
+    if (nthreads <= 0) nthreads = 1;
+
+    std::string fixedMnemonic;
+    uint8_t fixedPub[32];
+    prepare_fixed_key(o, fixedMnemonic, fixedPub);
+
+    Found found;
+    double elapsed = 0.0;
+    bool ranOnGpu = false;
+    execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu);
+
+    out->elapsed = elapsed;
+    out->usesGpu = ranOnGpu ? 1 : 0;
+
+    if (!found.ok.load()){
+        out->found = 0;
+        out->attempts = g_attempts.load();
+        return 0;
+    }
+
+    std::string addr, raw, pubh;
+    addr_to_string(found.addr, addr);
+    raw_address_string(found.addr, raw);
+    to_hex(found.pubkey, 32, pubh);
+
+    out->found = 1;
+    snprintf(out->address, sizeof(out->address), "%s", addr.c_str());
+    snprintf(out->raw, sizeof(out->raw), "%s", raw.c_str());
+    snprintf(out->pubkey, sizeof(out->pubkey), "%s", pubh.c_str());
+    snprintf(out->mnemonic, sizeof(out->mnemonic), "%s",
+             (o.mode == "phrase" || !fixedMnemonic.empty()) ? found.mnemonic.c_str() : "");
+    out->subwalletId = found.subwalletId;
+    out->attempts = found.attempts;
+    out->importable = importable_for(o, found) ? 1 : 0;
+    return 1;
+}
 
 static void usage(const char *prog){
     printf(
@@ -1180,41 +1384,13 @@ static int run_main(int argc, char **argv){
     }
 
     Found found;
-    auto t0 = std::chrono::steady_clock::now();
 
     // ---- prepare the fixed key material -----------------------------------
     uint8_t fixedPub[32];
-    std::string fixedMnemonic = o.mnemonic;
+    std::string fixedMnemonic;
+    prepare_fixed_key(o, fixedMnemonic, fixedPub);
 
     if (o.mode == "subwallet"){
-        if (fixedMnemonic.empty()){
-            Rng r; r.seed();
-            if (o.scheme == "ton"){
-                uint8_t entropy[64];
-                for (;;){
-                    fixedMnemonic.clear();
-                    uint8_t b[4];
-                    for (int i = 0; i < o.words; i++){
-                        r.fill(b, 4);
-                        uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
-                                     ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-                        if (i) fixedMnemonic += ' ';
-                        fixedMnemonic += BIP39_ENGLISH[v % 2048u];
-                    }
-                    ton_entropy(fixedMnemonic, entropy);
-                    if (ton_is_basic_seed(entropy)) break;
-                }
-            } else {
-                int entBytes = bip39_ent_bytes(o.words);
-                uint8_t ent[32]; r.fill(ent, entBytes);
-                bip39_from_entropy(ent, entBytes, fixedMnemonic);
-            }
-        }
-        uint8_t sec[32];
-        if (o.scheme == "ton") ton_derive_secret(fixedMnemonic, sec);
-        else                   app_derive_secret(fixedMnemonic, sec);
-        ed25519_pubkey(fixedPub, sec);
-        memset(sec, 0, sizeof(sec));
         printf("fixed mnemonic : %s\n", fixedMnemonic.c_str());
         { std::string h; to_hex(fixedPub, 32, h); printf("fixed pubkey   : %s\n", h.c_str()); }
         printf("searching subwalletId in [0, 2^32) ...\n\n");
@@ -1223,37 +1399,9 @@ static int run_main(int argc, char **argv){
                o.scheme == "ton" ? "TON" : "BIP39/app", o.subwalletId);
     }
 
-    // ---- progress thread ---------------------------------------------------
-    std::thread prog;
-    if (!o.quiet) prog = std::thread(progress_loop, std::cref(o), t0);
-
-    // ---- workers -----------------------------------------------------------
-    std::vector<std::thread> workers;
-    std::vector<Rng> rngs(nthreads);
-    for (int t = 0; t < nthreads; t++){
-        rngs[t].seed();
-        rngs[t].seed(); // discard first keystream block
-    }
-
+    double elapsed = 0.0;
     bool ranOnGpu = false;
-    if (o.mode == "phrase" && o.gpu && o.scheme == "app" && o.words == 12 && fixedMnemonic.empty())
-        ranOnGpu = gpu_phrase_search(o, found, nthreads);
-
-    if (!ranOnGpu){
-        for (int t = 0; t < nthreads; t++){
-            if (o.mode == "subwallet")
-                workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
-                                     t, nthreads, fixedPub, fixedMnemonic);
-            else
-                workers.emplace_back(worker_phrase, std::cref(o), std::ref(found), std::ref(rngs[t]),
-                                     t, nthreads);
-        }
-        for (auto &w : workers) w.join();
-    }
-    g_stop = true;
-    if (prog.joinable()) prog.join();
-
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu);
 
     if (!found.ok.load()){
         printf("no match found after %llu tries (%.1fs)\n",
@@ -1306,7 +1454,11 @@ static int run_main(int argc, char **argv){
 // ===========================================================================
 //  Entry point: when the .exe is started by double-click (no arguments),
 //  run a tiny interactive wizard so the user does not need the command line.
+//
+//  Omitted in library builds (-DWTM_LIB, e.g. the Android JNI library), which
+//  have no console.
 // ===========================================================================
+#ifndef WTM_LIB
 static std::string read_line(const char *prompt){
     printf("%s", prompt); fflush(stdout);
     char buf[512];
@@ -1356,3 +1508,4 @@ int main(int argc, char **argv){
     }
     return rc;
 }
+#endif // WTM_LIB

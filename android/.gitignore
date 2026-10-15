@@ -1,0 +1,12 @@
+# Generated / machine-specific
+local.properties
+.gradle/
+build/
+app/build/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+captures/
