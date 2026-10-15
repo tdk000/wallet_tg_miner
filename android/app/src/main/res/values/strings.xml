@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WalletTg Miner</string>
+
+    <string name="hint_intro">Поиск «красивого» адреса кошелька WalletTg. Работает полностью офлайн — ключи никуда не отправляются.</string>
+    <string name="hint_pattern">окончание/начало, напр. qq или _tg</string>
+
+    <string name="label_where">Где искать:</string>
+    <string name="place_end">в окончании</string>
+    <string name="place_start">в начале (после UQ/EQ)</string>
+
+    <string name="label_mode">Что перебирать:</string>
+    <string name="mode_phrase">мнемонику (12/24 слова, импортируется в Telegram)</string>
+    <string name="mode_sub">subwalletId (очень быстро, но не импортируется)</string>
+
+    <string name="label_words">Слов в мнемонике:</string>
+
+    <string name="opt_ci">не учитывать регистр (a = A)</string>
+    <string name="opt_gpu">использовать GPU (OpenCL), если доступно</string>
+
+    <string name="btn_start">Начать поиск</string>
+    <string name="btn_stop">Остановить</string>
+    <string name="btn_selftest">Проверить себя (self-test)</string>
+
+    <string name="result_title">Готово! Адрес найден</string>
+    <string name="copy_addr">Копировать адрес</string>
+    <string name="copy_phrase">Копировать фразу</string>
+
+    <string name="hint_safety">Никому не показывайте мнемонику. Перепроверьте адрес на блокчейне перед переводом средств.</string>
+
+    <string-array name="words_entries">
+        <item>12 слов</item>
+        <item>24 слова</item>
+    </string-array>
+</resources>
