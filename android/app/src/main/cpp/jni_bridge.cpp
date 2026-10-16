@@ -21,6 +21,18 @@ std::string jstr(JNIEnv *env, jstring s){
     return r;
 }
 
+jobjectArray mkarray(JNIEnv *env, const std::string *fields, int n){
+    jclass strCls = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray(n, strCls, nullptr);
+    if (!arr) return nullptr;
+    for (int i = 0; i < n; i++){
+        jstring s = env->NewStringUTF(fields[i].c_str());
+        env->SetObjectArrayElement(arr, i, s);
+        env->DeleteLocalRef(s);
+    }
+    return arr;
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -94,4 +106,34 @@ Java_com_wallettg_miner_Native_attempts(JNIEnv *, jclass){
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_wallettg_miner_Native_selftest(JNIEnv *, jclass){
     return wtm_selftest() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Old insecure deterministic fallback: does this phrase appear in its stream?
+// Returns [status, index, error] with status "found" | "notfound" | "error".
+// The phrase is wiped from local memory and never logged.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_wallettg_miner_Native_checkFallbackPhrase(
+        JNIEnv *env, jclass, jstring jmnemonic, jlong limit){
+    std::string m = jstr(env, jmnemonic);
+    wtm_fallback_result r;
+    int rc = wtm_check_fallback_phrase(m.c_str(), (unsigned long long)limit, &r);
+    if (!m.empty()) memset(&m[0], 0, m.size());
+
+    const char *status = (rc == 1) ? "found" : (rc == 0 ? "notfound" : "error");
+    char idx[32]; snprintf(idx, sizeof(idx), "%llu", (unsigned long long)r.index);
+    std::string fields[3] = { status, idx, r.error };
+    return mkarray(env, fields, 3);
+}
+
+// Developer diagnostics: reproduce the phrase/address the old buggy fallback
+// would emit at `index`. Returns [status, index, mnemonic, address, error].
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_wallettg_miner_Native_insecureDemoFallback(JNIEnv *env, jclass, jlong index){
+    wtm_fallback_result r;
+    int rc = wtm_insecure_demo_fallback((unsigned long long)index, &r);
+
+    const char *status = (rc == 1) ? "ok" : "error";
+    char idx[32]; snprintf(idx, sizeof(idx), "%llu", (unsigned long long)r.index);
+    std::string fields[5] = { status, idx, r.mnemonic, r.address, r.error };
+    return mkarray(env, fields, 5);
 }

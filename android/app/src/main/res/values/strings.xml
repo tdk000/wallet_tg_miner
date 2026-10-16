@@ -28,6 +28,16 @@
 
     <string name="hint_safety">Никому не показывайте мнемонику. Перепроверьте адрес на блокчейне перед переводом средств.</string>
 
+    <string name="check_title">Проверить фразу старой версии</string>
+    <string name="check_hint">Введите 12 слов мнемоники — приложение проверит, не сгенерирована ли она старым небезопасным способом (детерминированный fallback). Фраза обрабатывается только на устройстве, никуда не отправляется и не сохраняется.</string>
+    <string name="check_phrase_hint">12 слов через пробел</string>
+    <string name="label_limit">Лимит проверки:</string>
+    <string name="btn_check">Проверить фразу</string>
+    <string name="opt_dev">Режим разработчика</string>
+    <string name="dev_warning">Демо старого дефекта. Эти фразы предсказуемы — НИКОГДА не переводите на них средства.</string>
+    <string name="label_index">Индекс (фраза №):</string>
+    <string name="btn_demo">Показать демо-фразу</string>
+
     <string-array name="words_entries">
         <item>12 слов</item>
         <item>24 слова</item>

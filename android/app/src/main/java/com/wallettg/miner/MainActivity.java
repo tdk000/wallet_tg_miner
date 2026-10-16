@@ -34,6 +34,13 @@ public class MainActivity extends Activity {
     private View resultCard;
     private Button copyAddr, copyPhrase;
 
+    // Old-version weak-phrase check + developer-only demo.
+    private EditText checkPhrase, checkLimit, demoIndex;
+    private Button checkRun, demoRun;
+    private TextView checkResult, demoResult;
+    private CheckBox devMode;
+    private View devPanel;
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean running = false;
     private Thread worker;
@@ -77,6 +84,16 @@ public class MainActivity extends Activity {
         copyAddr   = findViewById(R.id.copyAddr);
         copyPhrase = findViewById(R.id.copyPhrase);
 
+        checkPhrase = findViewById(R.id.checkPhrase);
+        checkLimit  = findViewById(R.id.checkLimit);
+        demoIndex   = findViewById(R.id.demoIndex);
+        checkRun    = findViewById(R.id.checkRun);
+        demoRun     = findViewById(R.id.demoRun);
+        checkResult = findViewById(R.id.checkResult);
+        demoResult  = findViewById(R.id.demoResult);
+        devMode     = findViewById(R.id.devMode);
+        devPanel    = findViewById(R.id.devPanel);
+
         ArrayAdapter<String> ad = new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item,
                 getResources().getStringArray(R.array.words_entries));
@@ -92,6 +109,11 @@ public class MainActivity extends Activity {
 
         copyAddr.setOnClickListener(v -> copyToClipboard("WalletTg address", lastAddress));
         copyPhrase.setOnClickListener(v -> copyToClipboard("WalletTg mnemonic", lastMnemonic));
+
+        checkRun.setOnClickListener(v -> runFallbackCheck());
+        demoRun.setOnClickListener(v -> runDemoFallback());
+        devMode.setOnCheckedChangeListener((b, on) ->
+                devPanel.setVisibility(on ? View.VISIBLE : View.GONE));
 
         maybeRunFromIntent();
     }
@@ -232,6 +254,59 @@ public class MainActivity extends Activity {
         resultBody.setText(sb.toString());
         resultCard.setVisibility(View.VISIBLE);
         progress.setText(String.format(Locale.US, "Готово! Попыток: %,d за %.0f с", attempts, elapsed));
+    }
+
+    // ---- old-version weak-phrase check ------------------------------------
+
+    /**
+     * Checks whether a phrase was produced by the old insecure deterministic
+     * fallback.  The phrase is never logged, never copied and the input field
+     * is cleared before the check starts.
+     */
+    private void runFallbackCheck() {
+        final String phrase = checkPhrase.getText().toString().trim();
+        if (phrase.isEmpty()) { toast("Введите 12 слов"); return; }
+
+        long limit = 100000;
+        try { limit = Long.parseLong(checkLimit.getText().toString().trim()); } catch (Exception ignored) {}
+        if (limit <= 0) limit = 100000;
+
+        checkPhrase.setText("");                 // keep the secret out of the UI
+        checkResult.setText("Проверка…");
+        final long fLimit = limit;
+
+        new Thread(() -> {
+            String[] r = Native.checkFallbackPhrase(phrase, fLimit);
+            ui.post(() -> onCheckResult(r));
+        }, "fallback-check").start();
+    }
+
+    private void onCheckResult(String[] r) {
+        if (r == null) { checkResult.setText("Внутренняя ошибка"); return; }
+        if ("error".equals(r[0])) { checkResult.setText("Ошибка: " + r[2]); return; }
+        if ("found".equals(r[0])) {
+            checkResult.setText("⚠️ Фраза ПРЕДСКАЗУЕМА: совпадение с потоком старого дефекта, #"
+                    + r[1] + "\nНЕ пользуйтесь этой фразой — переведите средства на новый кошелёк.");
+            return;
+        }
+        checkResult.setText("Совпадений не найдено.\nЭто не гарантия: поток длиннее лимита, "
+                + "а проверка покрывает только 12-словную схему app.");
+    }
+
+    /** Developer mode only: reproduce an insecure fallback phrase (never for funds). */
+    private void runDemoFallback() {
+        long idx = 0;
+        try { idx = Long.parseLong(demoIndex.getText().toString().trim()); } catch (Exception ignored) {}
+        if (idx < 0) idx = 0;
+
+        String[] r = Native.insecureDemoFallback(idx);
+        if (r == null || !"ok".equals(r[0])) {
+            demoResult.setText("Ошибка: " + (r == null ? "null" : r[4]));
+            return;
+        }
+        demoResult.setText("ТЕСТ: фраза предсказуема, средства не отправлять\n\n"
+                + "фраза #" + r[1] + "\n" + r[2] + "\n\n"
+                + "адрес: " + r[3]);
     }
 
     private void setBusy(boolean busy) {
