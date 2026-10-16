@@ -43,6 +43,7 @@
 #include <chrono>
 #include <mutex>
 #include <algorithm>
+#include <cmath>
 
 #include "monocypher.h"
 #include "bip39_english.h"
@@ -63,6 +64,10 @@
    // double-clicked the .exe and the window would vanish instantly.
    extern "C" __declspec(dllimport) unsigned long __stdcall
    GetConsoleProcessList(unsigned long *lpdwProcessList, unsigned long dwProcessCount);
+   // kernel32 console handle/mode, used only for the optional ANSI-colour check.
+   extern "C" __declspec(dllimport) void *__stdcall GetStdHandle(unsigned long nStdHandle);
+   extern "C" __declspec(dllimport) int   __stdcall GetConsoleMode(void *hConsoleHandle, unsigned long *lpMode);
+   extern "C" __declspec(dllimport) int   __stdcall SetConsoleMode(void *hConsoleHandle, unsigned long dwMode);
    static bool launched_by_double_click() {
        unsigned long procs[4];
        unsigned long n = GetConsoleProcessList(procs, 4);
@@ -378,6 +383,124 @@ void bip39_from_entropy(const uint8_t *ent, int entBytes, std::string &out){
     }
 }
 
+// mnemonic -> entropy.  The BIP39 English list is sorted, so a plain binary
+// search is enough.  Returns false (and fills `err`) on an unknown word or a
+// bad SHA-256 checksum.  Only 12/24-word phrases are accepted.
+static int bip39_word_index(const std::string &w){
+    int lo = 0, hi = 2047;
+    while (lo <= hi){
+        int mid = (lo + hi) >> 1;
+        int c = std::strcmp(w.c_str(), BIP39_ENGLISH[mid]);
+        if (c == 0) return mid;
+        if (c < 0) hi = mid - 1; else lo = mid + 1;
+    }
+    return -1;
+}
+
+static bool bip39_to_entropy(const std::string &mnemonic, uint8_t ent[32],
+                             int &entBytes, std::string &err){
+    std::vector<std::string> w;
+    std::string cur;
+    for (char c : mnemonic){
+        if (std::isspace((unsigned char)c)){
+            if (!cur.empty()){ w.push_back(cur); cur.clear(); }
+        } else cur += (char)std::tolower((unsigned char)c);
+    }
+    if (!cur.empty()) w.push_back(cur);
+
+    if (w.size() != 12 && w.size() != 24){
+        err = "mnemonic must have 12 or 24 words (got " + std::to_string(w.size()) + ")";
+        return false;
+    }
+    entBytes = bip39_ent_bytes((int)w.size());
+    const int entBits = entBytes * 8, csBits = entBits / 32;
+
+    std::vector<int> bits;
+    bits.reserve(w.size() * 11);
+    for (const std::string &word : w){
+        int idx = bip39_word_index(word);
+        if (idx < 0){ err = "unknown BIP39 word: " + word; return false; }
+        for (int b = 10; b >= 0; b--) bits.push_back((idx >> b) & 1);
+    }
+
+    memset(ent, 0, 32);
+    for (int i = 0; i < entBits; i++)
+        if (bits[i]) ent[i >> 3] |= (uint8_t)(1u << (7 - (i & 7)));
+
+    uint8_t hash[32];
+    sha256(ent, entBytes, hash);
+    for (int i = 0; i < csBits; i++){
+        int got = bits[entBits + i];
+        int want = (hash[i >> 3] >> (7 - (i & 7))) & 1;
+        if (got != want){ err = "invalid mnemonic checksum"; return false; }
+    }
+    return true;
+}
+
+// ===========================================================================
+//  Legacy deterministic fallback stream  (reproduction of the old defect)
+// ---------------------------------------------------------------------------
+//  Early releases, whenever the OS entropy source was unavailable, seeded the
+//  generator from the fixed constant byte pattern below instead of failing.
+//  Every mnemonic was therefore a predictable function of its index.  The
+//  production Rng NEVER uses this code -- it lives here only so a user can test
+//  whether a phrase they already hold came from such a build.
+//
+//      s[i]  = (i*131 + 7) & 0xFF          (i = 0..47)
+//      key   = s[0 .. 32)
+//      nonce = s[32 .. 40)
+//      ctr   = big-endian uint64 of s[0 .. 8)
+//      stream = ChaCha20 (djb) over zero bytes
+//      phrase #n = BIP39 of the 16-byte entropy block at offset 16*n
+//                  (4 phrases per 64-byte ChaCha20 block)
+// ===========================================================================
+static void insecure_fallback_entropy(uint64_t index, uint8_t out[16]){
+    uint8_t s[48];
+    for (size_t i = 0; i < sizeof(s); i++) s[i] = (uint8_t)(i * 131 + 7);
+
+    uint8_t key[32], nonce[8];
+    memcpy(key, s, 32);
+    memcpy(nonce, s + 32, 8);
+    uint64_t ctr0 = 0;
+    for (int i = 0; i < 8; i++) ctr0 = (ctr0 << 8) | s[i];
+
+    static const uint8_t zeros[64] = {0};
+    uint8_t block[64];
+    crypto_chacha20_djb(block, zeros, 64, key, nonce, ctr0 + index / 4);
+    memcpy(out, block + (size_t)((index % 4) * 16), 16);
+
+    memset(s, 0, sizeof(s));
+    memset(block, 0, sizeof(block));
+}
+
+// Fallback check results.
+enum { FB_ERROR = -1, FB_NOT_FOUND = 0, FB_FOUND = 1 };
+
+// Was `mnemonic` emitted by the legacy fallback at some index below `limit`?
+// Returns FB_FOUND (and writes *index), FB_NOT_FOUND, or FB_ERROR (bad phrase).
+static int check_fallback_phrase(const std::string &mnemonic, uint64_t limit,
+                                 uint64_t *index, std::string &err){
+    uint8_t target[32];
+    int entBytes = 0;
+    if (!bip39_to_entropy(mnemonic, target, entBytes, err)) return FB_ERROR;
+    if (entBytes != 16){
+        err = "only 12-word (128-bit) phrases are supported by this check";
+        return FB_ERROR;
+    }
+
+    for (uint64_t i = 0; i < limit; i++){
+        uint8_t e[16];
+        insecure_fallback_entropy(i, e);
+        if (memcmp(e, target, 16) == 0){
+            if (index) *index = i;
+            memset(target, 0, sizeof(target));
+            return FB_FOUND;
+        }
+    }
+    memset(target, 0, sizeof(target));
+    return FB_NOT_FOUND;
+}
+
 // ===========================================================================
 //  Slip-0010 / app derivation (=== the app's "FU")
 //      seed = PBKDF2-HMAC-SHA512(mnemonic, salt="mnemonic", 2048, 64)
@@ -625,6 +748,13 @@ struct Options {
     bool gpuInfo = false;
     bool gpuTest = false;
     std::string pattern;
+
+    // legacy weak-phrase tools (see "Legacy deterministic fallback stream")
+    bool        checkFallback = false;
+    std::string checkPhrase;
+    uint64_t    checkLimit = 100000;
+    bool        demoFallback = false;
+    uint64_t    demoIndex = 0;
 };
 
 struct Found {
@@ -682,9 +812,10 @@ static bool selftest(){
         } else printf("[ok]   pbkdf2-hmac-sha512\n");
     }
 
-    // known on-chain pubkey -> known address
+    // synthetic pubkey -> address (cross-checked against @ton/core
+    // contractAddress() with the same WalletTrampoline code cell)
     {
-        const char *pubhex = "PUBKEY-REDACTED";
+        const char *pubhex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         uint8_t pub[32];
         for (int i = 0; i < 32; i++){
             auto hv = [](char c){ return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
@@ -692,9 +823,9 @@ static bool selftest(){
         }
         uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
         std::string s; addr_to_string(a, s);
-        if (s != "UQ-REDACTED"){
+        if (s != "UQAbzItZqG4Emy2gouoSMn5PXT--1pT6KuO_JlzeTOKAh_E7"){
             printf("[FAIL] address vector: %s\n", s.c_str()); fail++;
-        } else printf("[ok]   address vector (on-chain)\n");
+        } else printf("[ok]   address vector\n");
     }
 
     // known mnemonic -> pubkey + address (app derivation)
@@ -758,6 +889,49 @@ static bool selftest(){
         if (s != "UQDWukXCchiV2P81LG_vOCKhBFmLVY56nuvLUlMTWXrgQH4S"){
             printf("[FAIL] ton address: %s\n", s.c_str()); fail++;
         } else printf("[ok]   ton address\n");
+    }
+
+    // legacy deterministic fallback: phrase #0 and its address
+    {
+        uint8_t ent[16];
+        insecure_fallback_entropy(0, ent);
+        std::string m; bip39_from_entropy(ent, 16, m);
+        const char *exp =
+            "knife term question marble enroll supreme scene bus walnut slide review exclude";
+        if (m != exp){ printf("[FAIL] fallback phrase #0: %s\n", m.c_str()); fail++; }
+        else printf("[ok]   fallback phrase #0\n");
+
+        uint8_t sec[32]; app_derive_secret(m, sec);
+        uint8_t pub[32]; ed25519_pubkey(pub, sec);
+        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        std::string s; addr_to_string(a, s);
+        if (s != "UQB2dHHyDGA9mVPSe8-QgFQsuOKF7zwEFAwsCQrw-Qx8dUy9"){
+            printf("[FAIL] fallback phrase #0 address: %s\n", s.c_str()); fail++;
+        } else printf("[ok]   fallback phrase #0 address\n");
+    }
+
+    // fallback check: hit / miss / invalid checksum
+    {
+        uint64_t idx = 0; std::string err;
+        int rc = check_fallback_phrase(
+            "mail gadget olympic destroy blood ahead hold enemy behave inmate turn erosion",
+            7000, &idx, err);
+        if (rc != FB_FOUND || idx != 6706){
+            printf("[FAIL] fallback check hit: rc=%d idx=%llu %s\n",
+                   rc, (unsigned long long)idx, err.c_str()); fail++;
+        } else printf("[ok]   fallback check hit (#6706)\n");
+
+        rc = check_fallback_phrase(
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon about", 50, &idx, err);
+        if (rc != FB_NOT_FOUND){ printf("[FAIL] fallback check miss: rc=%d\n", rc); fail++; }
+        else printf("[ok]   fallback check miss\n");
+
+        rc = check_fallback_phrase(
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abandon", 50, &idx, err);
+        if (rc != FB_ERROR){ printf("[FAIL] fallback check checksum: rc=%d\n", rc); fail++; }
+        else printf("[ok]   fallback check checksum error\n");
     }
 
     printf(fail ? "\n%d self-test(s) FAILED\n" : "\nall self-tests passed\n", fail);
@@ -1157,6 +1331,22 @@ static bool execute_search(const Options &o, int nthreads, const std::string &fi
     return true;
 }
 
+// Reproduce the mnemonic + address the legacy fallback would emit at `index`.
+// Diagnostics only: such a phrase is predictable and must never hold funds.
+static void demo_insecure_fallback(uint64_t index, std::string &mnemonic, std::string &address){
+    uint8_t ent[16];
+    insecure_fallback_entropy(index, ent);
+    bip39_from_entropy(ent, 16, mnemonic);
+
+    uint8_t sec[32];  app_derive_secret(mnemonic, sec);
+    uint8_t pub[32];  ed25519_pubkey(pub, sec);
+    uint8_t addr[36]; wallet_address(pub, 0x7FFF7F11u, false, addr);
+    addr_to_string(addr, address);
+
+    memset(ent, 0, sizeof(ent));
+    memset(sec, 0, sizeof(sec));
+}
+
 // ===========================================================================
 //  Embeddable C API (see miner_api.h).  Implemented after the anonymous
 //  namespace, so it can reach the internal types above.
@@ -1190,6 +1380,42 @@ extern "C" void wtm_request_stop(void){
 extern "C" int wtm_selftest(void){
     wallet_init_code_hash();
     return selftest() ? 1 : 0;
+}
+
+extern "C" int wtm_check_fallback_phrase(const char *mnemonic, unsigned long long limit,
+                                         wtm_fallback_result *out){
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out) return FB_ERROR;
+    out->status = FB_ERROR;
+    if (!mnemonic){
+        snprintf(out->error, sizeof(out->error), "no mnemonic");
+        return FB_ERROR;
+    }
+    if (limit == 0) limit = 1;
+
+    std::string phrase = mnemonic;
+    uint64_t idx = 0; std::string err;
+    int rc = check_fallback_phrase(phrase, (uint64_t)limit, &idx, err);
+    if (!phrase.empty()) memset(&phrase[0], 0, phrase.size());  // do not keep the secret
+
+    out->status = rc;
+    if (rc == FB_FOUND) out->index = (unsigned long long)idx;
+    if (rc == FB_ERROR) snprintf(out->error, sizeof(out->error), "%s", err.c_str());
+    return rc;
+}
+
+extern "C" int wtm_insecure_demo_fallback(unsigned long long index, wtm_fallback_result *out){
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out) return FB_ERROR;
+    wallet_init_code_hash();
+
+    std::string m, a;
+    demo_insecure_fallback((uint64_t)index, m, a);
+    snprintf(out->mnemonic, sizeof(out->mnemonic), "%s", m.c_str());
+    snprintf(out->address,  sizeof(out->address),  "%s", a.c_str());
+    out->index  = index;
+    out->status = FB_FOUND;
+    return FB_FOUND;
 }
 
 extern "C" double wtm_expected_attempts(const char *pattern, int ci){
@@ -1282,7 +1508,105 @@ extern "C" int wtm_run(const wtm_params *p, wtm_result *out){
     return 1;
 }
 
-static void usage(const char *prog){
+// Read one line from stdin (for `--check-fallback-phrase -`).  Returns false on
+// EOF / empty input so a bare pipe does not silently pass an empty phrase.
+static bool read_secret_stdin(std::string &out){
+    char buf[2048];
+    if (!fgets(buf, sizeof(buf), stdin)) return false;
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' ||
+                          s.back() == ' '  || s.back() == '\t')) s.pop_back();
+    size_t i = 0; while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+    out = s.substr(i);
+    return !out.empty();
+}
+
+// May we emit ANSI colour?  On Windows try to switch the console into
+// virtual-terminal mode; elsewhere a plain tty check is enough.
+static bool ansi_ok(){
+#if defined(_WIN32)
+    void *h = GetStdHandle((unsigned long)-11);         // STD_OUTPUT_HANDLE
+    if (!h || h == (void *)-1) return false;
+    unsigned long m = 0;
+    if (!GetConsoleMode(h, &m)) return false;
+    if (m & 0x0004u) return true;                       // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    return SetConsoleMode(h, m | 0x0004u) != 0;
+#else
+    return isatty(1) != 0;
+#endif
+}
+
+// --check-fallback-phrase "<12 words>" [--limit N]
+//   0 = not found, 2 = found, 1 = error.
+static int cmd_check_fallback(const Options &o){
+    std::string phrase = o.checkPhrase;
+    if (phrase == "-"){
+        if (!read_secret_stdin(phrase)){
+            fprintf(stderr, "error: no mnemonic on stdin\n");
+            return 1;
+        }
+    }
+
+    uint64_t index = 0; std::string err;
+    int rc = check_fallback_phrase(phrase, o.checkLimit, &index, err);
+    if (!phrase.empty()) memset(&phrase[0], 0, phrase.size());   // do not keep the secret
+
+    if (rc == FB_ERROR){
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    printf("wallet_tg_miner - проверка фразы по потоку старой версии");
+    printf(" (<= %llu фраз)\n\n", (unsigned long long)o.checkLimit);
+
+    if (rc == FB_FOUND){
+        printf("!!! СОВПАДЕНИЕ: это фраза #%llu потока старого дефекта.\n",
+               (unsigned long long)index);
+        printf("!!! Фраза предсказуема — переведите средства на новый кошелёк\n");
+        printf("!!! и больше не пользуйтесь этой фразой.\n");
+        return 2;
+    }
+
+    printf("совпадений не найдено в первых %llu фразах потока.\n",
+           (unsigned long long)o.checkLimit);
+    printf("\nВАЖНО: отсутствие совпадения — НЕ гарантия.\n");
+    printf("  * поток длиннее %llu фраз, поэтому совпадение может быть дальше;\n",
+           (unsigned long long)o.checkLimit);
+    printf("  * проверка покрывает только 12-словную схему app\n");
+    printf("    (24-словная схема rotation/anchor+signing не проверяется);\n");
+    printf("  * в режиме subwallet опасна только фраза #0 (ключ берётся один\n");
+    printf("    раз, его первые 16 байт = фраза #0).\n");
+    return 0;
+}
+
+// --insecure-demo-fallback [--index K]  (hidden; only shown by --help-dev)
+static int cmd_demo_fallback(const Options &o){
+    std::string m, a;
+    demo_insecure_fallback(o.demoIndex, m, a);
+
+    const char *red = "\033[1;31m", *rst = "\033[0m";
+    const bool colour = ansi_ok();
+
+    if (colour) printf("%s", red);
+    printf("\n");
+    printf("  ################################################################\n");
+    printf("  #                                                              #\n");
+    printf("  #   ТЕСТ: фраза предсказуема, средства НЕ отправлять           #\n");
+    printf("  #                                                              #\n");
+    printf("  ################################################################\n");
+    if (colour) printf("%s", rst);
+
+    printf("\nпоток старой версии (детерминированный fallback), фраза #%llu\n",
+           (unsigned long long)o.demoIndex);
+    printf("  mnemonic : %s\n", m.c_str());
+    printf("  address  : %s\n", a.c_str());
+    printf("\nЭтот режим только воспроизводит старую ошибку и существует для\n");
+    printf("диагностики. Такие фразы НИКОГДА не должны хранить реальные средства.\n");
+    if (!m.empty()) memset(&m[0], 0, m.size());
+    return 0;
+}
+
+static void usage(const char *prog, bool dev = false){
     printf(
 "wallet_tg_miner - offline beauty address miner for Telegram Wallet (WalletTg)\n\n"
 "Usage: %s (--suffix STR | --prefix STR) [options]\n\n"
@@ -1322,8 +1646,25 @@ static void usage(const char *prog){
 "  --gpu-info         print the detected OpenCL device and exit\n"
 "  --gpu-test         check that GPU and CPU derivations agree, then exit\n"
 "  --wizard           interactive prompt (used automatically on double-click)\n"
-"  --help             this text\n",
+"  --help             this text\n"
+"  --help-dev         developer help (extra, insecure diagnostic modes)\n"
+"\n"
+"Old-version phrase check:\n"
+"  --check-fallback-phrase \"<12 words>\" [--limit N]\n"
+"                     check whether a mnemonic was produced by the old\n"
+"                     deterministic fallback (default limit 100000; \"-\" reads\n"
+"                     the phrase from stdin so it stays out of the shell history).\n"
+"                     exit codes: 0 = not found, 2 = found, 1 = error\n",
         prog);
+
+    if (dev) printf(
+"\n"
+"Developer (insecure diagnostics; never use with real funds):\n"
+"  --insecure-demo-fallback [--index K]\n"
+"                     print the phrase #K (default 0) that the OLD buggy\n"
+"                     fallback would produce, together with its address.\n"
+"  --index K          index for --insecure-demo-fallback (default 0)\n"
+"\n");
 }
 
 static int run_main(int argc, char **argv){
@@ -1357,6 +1698,11 @@ static int run_main(int argc, char **argv){
         else if (a == "--no-gpu")            o.gpu = false;
         else if (a == "--gpu-info")          o.gpuInfo = true;
         else if (a == "--gpu-test")          o.gpuTest = true;
+        else if (a == "--help-dev")          { usage(argv[0], true); return 0; }
+        else if (a == "--check-fallback-phrase")  { o.checkFallback = true; o.checkPhrase = need(i); }
+        else if (a == "--insecure-demo-fallback") { o.demoFallback = true; }
+        else if (a == "--limit")             o.checkLimit = strtoull(need(i).c_str(), nullptr, 0);
+        else if (a == "--index")             o.demoIndex  = strtoull(need(i).c_str(), nullptr, 0);
         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 2; }
     }
 
@@ -1377,6 +1723,10 @@ static int run_main(int argc, char **argv){
         return 0;
     }
     if (o.bench){ benchmark(); return 0; }
+
+    // legacy weak-phrase tools (independent of the search options above)
+    if (o.checkFallback) return cmd_check_fallback(o);
+    if (o.demoFallback)  return cmd_demo_fallback(o);
 
     if (o.suffix.empty() && o.prefix.empty()){
         fprintf(stderr, "error: specify --suffix STR or --prefix STR\n\n");
