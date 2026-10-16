@@ -560,17 +560,18 @@ struct Rng {
     uint64_t ctr;
     uint8_t buf[64];
     size_t pos;
-    void seed(){
+    // Fails closed: returns false (leaving the generator unseeded) when the OS
+    // entropy source is unavailable.  Deterministic data is never substituted.
+    bool seed(){
         uint8_t s[48];
-        if (!os_random(s, sizeof(s))){ // extremely unlikely fallback
-            for (size_t i = 0; i < sizeof(s); i++) s[i] = (uint8_t)(i * 131 + 7);
-        }
+        if (!os_random(s, sizeof(s))) return false;
         memcpy(key, s, 32);
         memcpy(nonce, s + 32, 8);
         ctr = 0;
         for (int i = 0; i < 8; i++) ctr = (ctr << 8) | s[i];
         pos = 64;
         memset(s, 0, sizeof(s));
+        return true;
     }
     void fill(uint8_t *out, size_t n){
         static const uint8_t zeros[64] = {0};
@@ -585,6 +586,20 @@ struct Rng {
         }
     }
 };
+
+// ===========================================================================
+//  Entropy policy
+// ===========================================================================
+//  If the OS entropy source is unavailable we must NOT fall back to a
+//  deterministic generator (that would hand out predictable mnemonics).  On
+//  the CLI we report the fault on stderr and exit with a non-zero status; the
+//  embedded API instead propagates the error to the caller (see wtm_run).
+static const char *const ENTROPY_ERROR = "OS entropy source unavailable";
+
+static void fatal_entropy(){
+    fprintf(stderr, "fatal: %s\n", ENTROPY_ERROR);
+    exit(1);
+}
 
 // ===========================================================================
 //  Options
@@ -826,19 +841,22 @@ static void worker_phrase(const Options &o, Found &f, Rng &rng, int tid, int nth
     }
 }
 
+// Result of the GPU phrase worker.  "Unavailable" means the GPU could not be
+// used and the caller should fall back to the CPU worker; "EntropyError" means
+// the OS entropy source failed and the whole search must abort.
+enum class GpuRun { Ran, Unavailable, EntropyError };
+
 // ---------------------------------------------------------------------------
 //  GPU phrase worker.
 //
 //  The GPU derives the 32-byte `app` secret (PBKDF2 + SLIP-0010 -- the part
 //  that dominates the CPU cost); the CPU pool then derives the ed25519 public
-//  key and the TON address for every secret in the batch.  Returns false only
-//  if the GPU path could not be used, in which case the caller falls back to
-//  the plain CPU worker.
+//  key and the TON address for every secret in the batch.
 // ---------------------------------------------------------------------------
-static bool gpu_phrase_search(const Options &o, Found &f, int nthreads){
+static GpuRun gpu_phrase_search(const Options &o, Found &f, int nthreads){
     gpu::AppDeriver der;
     std::string err;
-    if (!der.init(&err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return false; }
+    if (!der.init(&err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return GpuRun::Unavailable; }
 
     if (!o.quiet){
         const gpu::Info &gi = der.info();
@@ -850,7 +868,8 @@ static bool gpu_phrase_search(const Options &o, Found &f, int nthreads){
     const int entBytes = bip39_ent_bytes(o.words);
     const int nt = nthreads < 1 ? 1 : nthreads;
 
-    Rng rng; rng.seed(); rng.seed();
+    Rng rng;
+    if (!rng.seed()) return GpuRun::EntropyError;
     std::vector<std::string> mn; mn.reserve(B);
     std::vector<uint8_t> sec;
 
@@ -869,7 +888,7 @@ static bool gpu_phrase_search(const Options &o, Found &f, int nthreads){
 
         if (!der.derive(mn, sec, &err)){
             fprintf(stderr, "[gpu] %s\n", err.c_str());
-            return false;
+            return GpuRun::Unavailable;
         }
 
         const size_t n = mn.size();
@@ -898,7 +917,7 @@ static bool gpu_phrase_search(const Options &o, Found &f, int nthreads){
         }
         if (f.ok.load()) g_stop = true;
     }
-    return true;
+    return GpuRun::Ran;
 }
 
 // Compare GPU and CPU derivations on a handful of mnemonics.
@@ -914,7 +933,8 @@ static int gpu_selftest(){
     gpu::AppDeriver der; std::string err;
     if (!der.init(&err)){ printf("[FAIL] gpu init: %s\n", err.c_str()); return 1; }
 
-    Rng r; r.seed(); r.seed();
+    Rng r;
+    if (!r.seed() || !r.seed()) fatal_entropy();
     std::vector<std::string> mn;
     mn.push_back("abandon abandon abandon abandon abandon abandon "
                  "abandon abandon abandon abandon abandon about");
@@ -1025,7 +1045,8 @@ static void benchmark(){
         gpu::AppDeriver der; std::string err;
         if (der.init(&err)){
             std::vector<std::string> mn; mn.reserve(4096);
-            Rng r; r.seed(); r.seed();
+            Rng r;
+            if (!r.seed() || !r.seed()) fatal_entropy();
             for (int i = 0; i < 4096; i++){
                 uint8_t ent[16]; r.fill(ent, 16); std::string m;
                 bip39_from_entropy(ent, 16, m); mn.push_back(std::move(m));
@@ -1049,12 +1070,13 @@ static void benchmark(){
 //  (wtm_run).  prepare_fixed_key() builds the key material that stays
 //  constant in subwallet mode; execute_search() runs the worker pool.
 // ===========================================================================
-static void prepare_fixed_key(const Options &o, std::string &fixedMnemonic, uint8_t fixedPub[32]){
+static bool prepare_fixed_key(const Options &o, std::string &fixedMnemonic, uint8_t fixedPub[32]){
     fixedMnemonic = o.mnemonic;
-    if (o.mode != "subwallet") return;
+    if (o.mode != "subwallet") return true;
 
     if (fixedMnemonic.empty()){
-        Rng r; r.seed();
+        Rng r;
+        if (!r.seed()) return false;
         if (o.scheme == "ton"){
             uint8_t entropy[64];
             for (;;){
@@ -1081,9 +1103,10 @@ static void prepare_fixed_key(const Options &o, std::string &fixedMnemonic, uint
     else                   app_derive_secret(fixedMnemonic, sec);
     ed25519_pubkey(fixedPub, sec);
     memset(sec, 0, sizeof(sec));
+    return true;
 }
 
-static void execute_search(const Options &o, int nthreads, const std::string &fixedMnemonic,
+static bool execute_search(const Options &o, int nthreads, const std::string &fixedMnemonic,
                            const uint8_t fixedPub[32], Found &found,
                            double &elapsed, bool &ranOnGpu){
     g_attempts = 0;
@@ -1094,19 +1117,30 @@ static void execute_search(const Options &o, int nthreads, const std::string &fi
     std::thread prog;
     if (!o.quiet) prog = std::thread(progress_loop, std::cref(o), t0);
 
-    // ---- workers -----------------------------------------------------------
-    std::vector<std::thread> workers;
-    std::vector<Rng> rngs(nthreads);
-    for (int t = 0; t < nthreads; t++){
-        rngs[t].seed();
-        rngs[t].seed(); // discard first keystream block
+    // Stop the progress thread and report failure on an unrecoverable error.
+    auto bail = [&]() -> bool {
+        g_stop = true;
+        if (prog.joinable()) prog.join();
+        return false;
+    };
+
+    // ---- GPU path (optional) ----------------------------------------------
+    ranOnGpu = false;
+    if (o.mode == "phrase" && o.gpu && o.scheme == "app" && o.words == 12 && fixedMnemonic.empty()){
+        GpuRun g = gpu_phrase_search(o, found, nthreads);
+        if (g == GpuRun::EntropyError) return bail();
+        ranOnGpu = (g == GpuRun::Ran);
     }
 
-    ranOnGpu = false;
-    if (o.mode == "phrase" && o.gpu && o.scheme == "app" && o.words == 12 && fixedMnemonic.empty())
-        ranOnGpu = gpu_phrase_search(o, found, nthreads);
-
+    // ---- CPU workers -------------------------------------------------------
+    // Seed every per-thread DRBG up front: fail closed if the OS has no entropy.
     if (!ranOnGpu){
+        std::vector<Rng> rngs(nthreads);
+        for (int t = 0; t < nthreads; t++){
+            if (!rngs[t].seed()) return bail();
+            if (!rngs[t].seed()) return bail(); // discard first keystream block
+        }
+        std::vector<std::thread> workers;
         for (int t = 0; t < nthreads; t++){
             if (o.mode == "subwallet")
                 workers.emplace_back(worker_subwallet, std::cref(o), std::ref(found), std::ref(rngs[t]),
@@ -1120,6 +1154,7 @@ static void execute_search(const Options &o, int nthreads, const std::string &fi
     g_stop = true;
     if (prog.joinable()) prog.join();
     elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return true;
 }
 
 // ===========================================================================
@@ -1213,12 +1248,13 @@ extern "C" int wtm_run(const wtm_params *p, wtm_result *out){
 
     std::string fixedMnemonic;
     uint8_t fixedPub[32];
-    prepare_fixed_key(o, fixedMnemonic, fixedPub);
+    if (!prepare_fixed_key(o, fixedMnemonic, fixedPub)) return fail(ENTROPY_ERROR);
 
     Found found;
     double elapsed = 0.0;
     bool ranOnGpu = false;
-    execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu);
+    if (!execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu))
+        return fail(ENTROPY_ERROR);
 
     out->elapsed = elapsed;
     out->usesGpu = ranOnGpu ? 1 : 0;
@@ -1388,7 +1424,7 @@ static int run_main(int argc, char **argv){
     // ---- prepare the fixed key material -----------------------------------
     uint8_t fixedPub[32];
     std::string fixedMnemonic;
-    prepare_fixed_key(o, fixedMnemonic, fixedPub);
+    if (!prepare_fixed_key(o, fixedMnemonic, fixedPub)) fatal_entropy();
 
     if (o.mode == "subwallet"){
         printf("fixed mnemonic : %s\n", fixedMnemonic.c_str());
@@ -1401,7 +1437,7 @@ static int run_main(int argc, char **argv){
 
     double elapsed = 0.0;
     bool ranOnGpu = false;
-    execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu);
+    if (!execute_search(o, nthreads, fixedMnemonic, fixedPub, found, elapsed, ranOnGpu)) fatal_entropy();
 
     if (!found.ok.load()){
         printf("no match found after %llu tries (%.1fs)\n",
