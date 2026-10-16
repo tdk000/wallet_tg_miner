@@ -44,6 +44,14 @@ typedef struct {
     int      importable;    /* 1 = a standard client will show this address */
 } wtm_result;
 
+typedef struct {
+    int                status;   /* 1 = found/ok, 0 = not found, -1 = error */
+    unsigned long long index;    /* stream index (found / demo)             */
+    char               mnemonic[512];
+    char               address[64];
+    char               error[256];
+} wtm_fallback_result;
+
 /* Fill *p with safe defaults (phrase/app/12 words/no gpu). */
 void wtm_defaults(wtm_params *p);
 
@@ -63,6 +71,16 @@ int wtm_selftest(void);
 
 /* Expected number of attempts for a pattern (probability model). */
 double wtm_expected_attempts(const char *pattern, int ci);
+
+/* Was `mnemonic` produced by the old insecure deterministic fallback
+ * (12-word app phrases only)?  Scans the first `limit` phrases.
+ * 1 = found (out->index), 0 = not found, -1 = error (out->error). */
+int wtm_check_fallback_phrase(const char *mnemonic, unsigned long long limit,
+                              wtm_fallback_result *out);
+
+/* Developer diagnostics: reproduce the phrase/address the old buggy fallback
+ * would emit at `index`.  Insecure by construction -- never use for funds. */
+int wtm_insecure_demo_fallback(unsigned long long index, wtm_fallback_result *out);
 
 #ifdef __cplusplus
 }
