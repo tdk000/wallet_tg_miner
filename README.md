@@ -528,6 +528,5 @@ wallet_tg_miner --check-fallback-phrase - < phrase.txt
 
 - **TON:** `UQDnTusuOEAq7qk_0tVgAujsWLjCtyoKAaSFvhxdxX8Gxrcn`
 
-Средства идут на развитие проекта (новые функции, поддержка, инфраструктура). Это не благотворительный сбор — донаты считаются доходом физлица, налоги уплачиваются.
 
 [![TON](https://img.shields.io/badge/TON-Donate-0098EA?logo=ton)](https://tonviewer.com/UQDnTusuOEAq7qk_0tVgAujsWLjCtyoKAaSFvhxdxX8Gxrcn)
