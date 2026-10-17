@@ -1645,7 +1645,8 @@ static void usage(const char *prog, bool dev = false){
 "                     Falls back to the CPU automatically when OpenCL is absent.\n"
 "  --gpu-info         print the detected OpenCL device and exit\n"
 "  --gpu-test         check that GPU and CPU derivations agree, then exit\n"
-"  --wizard           interactive prompt (used automatically on double-click)\n"
+"  --wizard           interactive prompt: search / old-phrase check / demo\n"
+"                     (used automatically on double-click)\n"
 "  --help             this text\n"
 "  --help-dev         developer help (extra, insecure diagnostic modes)\n"
 "\n"
@@ -1856,23 +1857,55 @@ static std::string read_line(const char *prompt){
     return s.substr(i);
 }
 
+// Same feature set as the Android app: search, old-version phrase check and
+// the developer demo.  The check/demo sessions are the same code paths as the
+// --check-fallback-phrase / --insecure-demo-fallback command line options.
 static int interactive_wizard(){
-    printf("\n=== wallet_tg_miner - beauty address for WalletTg ===\n\n");
-    printf("Addresses look like:  UQ................................zz\n\n");
+    printf("\n=== wallet_tg_miner - красивый адрес для WalletTg ===\n\n");
+    printf("Адреса выглядят так:  UQ................................zz\n\n");
 
-    std::string suf = read_line("Desired ending of the address (e.g. TG): ");
-    if (suf.empty()){ printf("Nothing entered - exiting.\n"); return 1; }
+    printf("Что сделать:\n");
+    printf("  1) найти красивый адрес (по умолчанию)\n");
+    printf("  2) проверить фразу старой версии\n");
+    printf("     (не сгенерирована ли она старым небезопасным способом)\n");
+    printf("  3) [режим разработчика] показать демо-фразу старого дефекта\n");
+    std::string what = read_line("Выбор [1]: ");
 
-    printf("\nMode:\n");
-    printf("  1) usable (recommended) - phrase mode: the words themselves control the\n");
-    printf("     address, so Telegram shows the SAME address after you import them\n");
-    printf("  2) fast   - subwallet mode: takes seconds, but Telegram will show a\n");
-    printf("     DIFFERENT address (it would need the same custom subwalletId)\n");
-    std::string mode = read_line("Choose [1]: ");
-    const char *m = (mode == "2") ? "subwallet" : "phrase";
+    std::vector<std::string> a = { "wallet_tg_miner" };
 
-    printf("\nStarting...\n\n");
-    std::vector<std::string> a = { "wallet_tg_miner", "--mode", m, "--suffix", suf };
+    if (what == "2"){
+        printf("\nВведите 12 слов мнемоники через пробел.\n");
+        printf("Фраза проверяется только на этом компьютере, никуда не отправляется\n");
+        printf("и не сохраняется. Лимит — сколько первых фраз потока проверить.\n");
+        std::string phrase = read_line("Мнемоника: ");
+        if (phrase.empty()){ printf("Ничего не введено - выход.\n"); return 1; }
+        std::string lim = read_line("Лимит проверки [100000]: ");
+        a.push_back("--check-fallback-phrase"); a.push_back(phrase);
+        if (!lim.empty()){ a.push_back("--limit"); a.push_back(lim); }
+    } else if (what == "3"){
+        printf("\nДЕМО СТАРОГО ДЕФЕКТА. Эти фразы предсказуемы -\n");
+        printf("НИКОГДА не переводите на них средства.\n");
+        std::string idx = read_line("Номер фразы [0]: ");
+        a.push_back("--insecure-demo-fallback");
+        if (!idx.empty()){ a.push_back("--index"); a.push_back(idx); }
+    } else {
+        std::string suf = read_line("Желаемое окончание адреса (например TG): ");
+        if (suf.empty()){ printf("Ничего не введено - выход.\n"); return 1; }
+
+        printf("\nРежим:\n");
+        printf("  1) рабочий (рекомендуется) - режим фразы: слова сами задают адрес,\n");
+        printf("     поэтому в Telegram после импорта будет ТОТ ЖЕ адрес\n");
+        printf("  2) быстрый - режим subwallet: секунды, но Telegram покажет\n");
+        printf("     ДРУГОЙ адрес (нужен тот же самый subwalletId)\n");
+        std::string mode = read_line("Выбор [1]: ");
+        const char *m = (mode == "2") ? "subwallet" : "phrase";
+
+        a.push_back("--mode"); a.push_back(m);
+        a.push_back("--suffix"); a.push_back(suf);
+    }
+
+    printf("\nЗапуск...\n\n");
+
     std::vector<char *> av;
     for (auto &x : a) av.push_back(const_cast<char *>(x.c_str()));
     return run_main((int)av.size(), av.data());
