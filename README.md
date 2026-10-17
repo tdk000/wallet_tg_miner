@@ -521,3 +521,13 @@ wallet_tg_miner --check-fallback-phrase - < phrase.txt
 Демонстрационный режим `--insecure-demo-fallback [--index K]` печатает такую
 фразу и её адрес; он спрятан за `--help-dev` и предназначен только для
 разработчиков. Такие фразы **предсказуемы** — никогда не храните на них средства.
+
+## 13. Поддержать проект
+
+Проект развивается в свободное время. Если он оказался полезен — можно поддержать разработку:
+
+- **TON:** `UQBfFJ_u9V3dNCgWJYn2O-rbdFPalGw5YdGJb2o0zlvKSTDK`
+
+Средства идут на развитие проекта (новые функции, поддержка, инфраструктура). Это не благотворительный сбор — донаты считаются доходом физлица, налоги уплачиваются.
+
+[![TON](https://img.shields.io/badge/TON-Donate-0098EA?logo=ton)](https://tonviewer.com/UQBfFJ_u9V3dNCgWJYn2O-rbdFPalGw5YdGJb2o0zlvKSTDK)
