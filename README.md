@@ -526,8 +526,8 @@ wallet_tg_miner --check-fallback-phrase - < phrase.txt
 
 Проект развивается в свободное время. Если он оказался полезен — можно поддержать разработку:
 
-- **TON:** `UQBfFJ_u9V3dNCgWJYn2O-rbdFPalGw5YdGJb2o0zlvKSTDK`
+- **TON:** `UQDnTusuOEAq7qk_0tVgAujsWLjCtyoKAaSFvhxdxX8Gxrcn`
 
 Средства идут на развитие проекта (новые функции, поддержка, инфраструктура). Это не благотворительный сбор — донаты считаются доходом физлица, налоги уплачиваются.
 
-[![TON](https://img.shields.io/badge/TON-Donate-0098EA?logo=ton)](https://tonviewer.com/UQBfFJ_u9V3dNCgWJYn2O-rbdFPalGw5YdGJb2o0zlvKSTDK)
+[![TON](https://img.shields.io/badge/TON-Donate-0098EA?logo=ton)](https://tonviewer.com/UQDnTusuOEAq7qk_0tVgAujsWLjCtyoKAaSFvhxdxX8Gxrcn)
