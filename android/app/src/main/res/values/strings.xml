@@ -2,44 +2,88 @@
 <resources>
     <string name="app_name">WalletTg Miner</string>
 
-    <string name="hint_intro">Поиск «красивого» адреса кошелька WalletTg. Работает полностью офлайн — ключи никуда не отправляются.</string>
-    <string name="hint_pattern">окончание/начало, напр. qq или _tg</string>
+    <string name="hint_intro">Search for a "beautiful" WalletTg wallet address. Works fully offline - keys are never sent anywhere.</string>
+    <string name="hint_pattern">ending/beginning, e.g. qq or _tg</string>
 
-    <string name="label_where">Где искать:</string>
-    <string name="place_end">в окончании</string>
-    <string name="place_start">в начале (после UQ/EQ)</string>
+    <string name="label_where">Where to search:</string>
+    <string name="place_end">at the end</string>
+    <string name="place_start">at the beginning (after UQ/EQ)</string>
 
-    <string name="label_mode">Что перебирать:</string>
-    <string name="mode_phrase">мнемонику (12/24 слова, импортируется в Telegram)</string>
-    <string name="mode_sub">subwalletId (очень быстро, но не импортируется)</string>
+    <string name="label_mode">What to brute-force:</string>
+    <string name="mode_phrase">mnemonic (12/24 words, importable into Telegram)</string>
+    <string name="mode_sub">subwalletId (very fast, but not importable)</string>
 
-    <string name="label_words">Слов в мнемонике:</string>
+    <string name="label_words">Words in mnemonic:</string>
 
-    <string name="opt_ci">не учитывать регистр (a = A)</string>
-    <string name="opt_gpu">использовать GPU (OpenCL), если доступно</string>
+    <string name="opt_ci">case-insensitive (a = A)</string>
+    <string name="opt_gpu">use GPU (OpenCL) if available</string>
 
-    <string name="btn_start">Начать поиск</string>
-    <string name="btn_stop">Остановить</string>
-    <string name="btn_selftest">Проверить себя (self-test)</string>
+    <string name="btn_start">Start search</string>
+    <string name="btn_stop">Stop</string>
+    <string name="btn_selftest">Self-test</string>
 
-    <string name="result_title">Готово! Адрес найден</string>
-    <string name="copy_addr">Копировать адрес</string>
-    <string name="copy_phrase">Копировать фразу</string>
+    <string name="result_title">Done! Address found</string>
+    <string name="copy_addr">Copy address</string>
+    <string name="copy_phrase">Copy phrase</string>
 
-    <string name="hint_safety">Никому не показывайте мнемонику. Перепроверьте адрес на блокчейне перед переводом средств.</string>
+    <string name="hint_safety">Never share your mnemonic. Verify the address on the blockchain before sending funds.</string>
 
-    <string name="check_title">Проверить фразу старой версии</string>
-    <string name="check_hint">Введите 12 слов мнемоники — приложение проверит, не сгенерирована ли она старым небезопасным способом (детерминированный fallback). Фраза обрабатывается только на устройстве, никуда не отправляется и не сохраняется.</string>
-    <string name="check_phrase_hint">12 слов через пробел</string>
-    <string name="label_limit">Лимит проверки:</string>
-    <string name="btn_check">Проверить фразу</string>
-    <string name="opt_dev">Режим разработчика</string>
-    <string name="dev_warning">Демо старого дефекта. Эти фразы предсказуемы — НИКОГДА не переводите на них средства.</string>
-    <string name="label_index">Индекс (фраза №):</string>
-    <string name="btn_demo">Показать демо-фразу</string>
+    <string name="check_title">Check an old-version phrase</string>
+    <string name="check_hint">Enter 12 mnemonic words - the app checks whether the phrase was produced by the old insecure method (deterministic fallback). The phrase is processed only on the device, never sent or stored.</string>
+    <string name="check_phrase_hint">12 words separated by spaces</string>
+    <string name="label_limit">Check limit:</string>
+    <string name="btn_check">Check phrase</string>
+    <string name="opt_dev">Developer mode</string>
+    <string name="dev_warning">Demo of the old defect. These phrases are predictable - NEVER send funds to them.</string>
+    <string name="label_index">Index (phrase #):</string>
+    <string name="btn_demo">Show demo phrase</string>
 
     <string-array name="words_entries">
-        <item>12 слов</item>
-        <item>24 слова</item>
+        <item>12 words</item>
+        <item>24 words</item>
     </string-array>
+
+    <!-- runtime / search -->
+    <string name="chance_fmt">Chance: ~%.1f%%</string>
+    <string name="progress_fmt">Attempts: %1$,d\nSpeed: %2$,.0f/s\nTime: %3$.0f s%4$s</string>
+    <string name="selftest_ok">Self-test: OK</string>
+    <string name="selftest_fail">Self-test: FAILED</string>
+    <string name="err_empty_pattern">Enter an ending or a beginning</string>
+    <string name="err_bad_chars">Only A-Z a-z 0-9 - _ allowed</string>
+    <string name="starting">Starting</string>
+    <string name="starting_gpu"> (GPU)...</string>
+    <string name="starting_cpu">...</string>
+    <string name="internal_error">Internal error</string>
+    <string name="error_fmt">Error: %s</string>
+    <string name="stopped_fmt">Stopped.\nAttempts: %1$,d\nTime: %2$.0f s</string>
+    <string name="address_label">Address:\n</string>
+    <string name="mnemonic_label">Mnemonic:\n</string>
+    <string name="attempts_label">Attempts: </string>
+    <string name="time_fmt">Time: %.1f s</string>
+    <string name="gpu_yes">GPU: yes</string>
+    <string name="found_importable">✅ This address will appear in Telegram Wallet when you import the phrase.</string>
+    <string name="found_nonstandard">⚠️ Non-standard subwalletId: a normal wallet will show a DIFFERENT address.</string>
+    <string name="done_fmt">Done! %1$,d attempts in %2$.0f s</string>
+
+    <!-- old-version check -->
+    <string name="enter_12_words">Enter 12 words</string>
+    <string name="checking">Checking…</string>
+    <string name="check_notfound">No matches found.\nThis is not a guarantee: the stream is longer than the limit, and only the 12-word app scheme is checked.</string>
+    <string name="check_found_fmt">⚠️ PREDICTABLE phrase: match with the old defect stream, #%s\nDo NOT use this phrase - move funds to a new wallet.</string>
+
+    <!-- demo -->
+    <string name="demo_error_fmt">Error: %s</string>
+    <string name="demo_title">TEST: phrase is predictable, do not send funds</string>
+    <string name="demo_phrase_label">phrase #</string>
+    <string name="demo_address_label">address: </string>
+
+    <!-- misc -->
+    <string name="nothing_to_copy">Nothing to copy</string>
+    <string name="copied">Copied</string>
+
+    <!-- language picker -->
+    <string name="lang_title">Choose language</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_en">English</string>
+    <string name="lang_zh">中文</string>
 </resources>

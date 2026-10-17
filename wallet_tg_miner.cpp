@@ -50,6 +50,18 @@
 #include "gpu_opencl.h"
 #include "miner_api.h"
 
+// UI language for the interactive wizard and the legacy check/demo output.
+// Default is Russian (matches the historical behaviour of the CLI).
+enum Lang { LANG_RU = 0, LANG_EN = 1, LANG_CN = 2 };
+static Lang g_lang = LANG_RU;
+static const char *L3(const char *ru, const char *en, const char *cn) {
+    switch (g_lang) { case LANG_EN: return en; case LANG_CN: return cn; default: return ru; }
+}
+static Lang parse_lang(const std::string &s) {
+    if (s == "en" || s == "EN" || s == "english" || s == "English") return LANG_EN;
+    if (s == "cn" || s == "CN" || s == "zh" || s == "ZH" || s == "chinese" || s == "Chinese" || s == "zh-cn" || s == "zh_CN") return LANG_CN;
+    return LANG_RU;
+}
 // ===========================================================================
 //  Platform entropy (used only to seed the per-thread ChaCha20 DRBG)
 // ===========================================================================
@@ -1578,7 +1590,9 @@ static int cmd_check_fallback(const Options &o){
     std::string phrase = o.checkPhrase;
     if (phrase == "-"){
         if (!read_secret_stdin(phrase)){
-            fprintf(stderr, "error: no mnemonic on stdin\n");
+            fprintf(stderr, "%s\n", L3("ошибка: нет мнемоники в stdin",
+                                       "error: no mnemonic on stdin",
+                                       "错误：stdin 中没有助记词"));
             return 1;
         }
     }
@@ -1588,30 +1602,53 @@ static int cmd_check_fallback(const Options &o){
     if (!phrase.empty()) memset(&phrase[0], 0, phrase.size());   // do not keep the secret
 
     if (rc == FB_ERROR){
-        fprintf(stderr, "error: %s\n", err.c_str());
+        fprintf(stderr, "%s: %s\n", L3("ошибка", "error", "错误"), err.c_str());
         return 1;
     }
 
-    printf("wallet_tg_miner - проверка фразы по потоку старой версии");
-    printf(" (<= %llu фраз)\n\n", (unsigned long long)o.checkLimit);
+    printf("%s", L3("wallet_tg_miner - проверка фразы по потоку старой версии",
+                    "wallet_tg_miner - checking phrase against the old version stream",
+                    "wallet_tg_miner - 检查短语是否来自旧版数据流"));
+    printf(" (<= %llu %s)\n\n", (unsigned long long)o.checkLimit,
+           L3("фраз", "phrases", "短语"));
 
     if (rc == FB_FOUND){
-        printf("!!! СОВПАДЕНИЕ: это фраза #%llu потока старого дефекта.\n",
+        printf(L3("!!! СОВПАДЕНИЕ: это фраза #%llu потока старого дефекта.\n",
+                  "!!! MATCH: this is phrase #%llu of the old defect stream.\n",
+                  "!!! 匹配：这是旧版缺陷数据流的第 %llu 条短语。\n"),
                (unsigned long long)index);
-        printf("!!! Фраза предсказуема — переведите средства на новый кошелёк\n");
-        printf("!!! и больше не пользуйтесь этой фразой.\n");
+        printf("%s\n", L3("!!! Фраза предсказуема — переведите средства на новый кошелёк",
+                           "!!! The phrase is predictable - move funds to a new wallet",
+                           "!!! 该短语可被预测 — 请将资金转移到新钱包"));
+        printf("%s\n", L3("!!! и больше не пользуйтесь этой фразой.",
+                           "!!! and never use this phrase again.",
+                           "!!! 并不要再使用该短语。"));
         return 2;
     }
 
-    printf("совпадений не найдено в первых %llu фразах потока.\n",
+    printf(L3("совпадений не найдено в первых %llu фразах потока.\n",
+              "no matches found in the first %llu phrases of the stream.\n",
+              "在数据流前 %llu 条短语中未找到匹配。\n"),
            (unsigned long long)o.checkLimit);
-    printf("\nВАЖНО: отсутствие совпадения — НЕ гарантия.\n");
-    printf("  * поток длиннее %llu фраз, поэтому совпадение может быть дальше;\n",
+    printf("\n%s\n", L3("ВАЖНО: отсутствие совпадения — НЕ гарантия.",
+                        "IMPORTANT: no match is NOT a guarantee.",
+                        "重要：未找到匹配并不等于安全。"));
+    printf(L3("  * поток длиннее %llu фраз, поэтому совпадение может быть дальше;\n",
+              "  * the stream is longer than %llu phrases, so a match may appear later;\n",
+              "  * 数据流长度超过 %llu 条短语，匹配可能出现在更后面；\n"),
            (unsigned long long)o.checkLimit);
-    printf("  * проверка покрывает только 12-словную схему app\n");
-    printf("    (24-словная схема rotation/anchor+signing не проверяется);\n");
-    printf("  * в режиме subwallet опасна только фраза #0 (ключ берётся один\n");
-    printf("    раз, его первые 16 байт = фраза #0).\n");
+    printf("  %s\n", L3("* проверка покрывает только 12-словную схему app",
+                          "* the check covers only the 12-word app scheme",
+                          "* 检查仅覆盖 12 词 app 方案"));
+    printf("    %s\n", L3("(24-словная схема rotation/anchor+signing не проверяется);",
+                            "(the 24-word rotation/anchor+signing scheme is not checked);",
+                            "（24 词 rotation/anchor+signing 方案未被检查）；"));
+    printf("  %s\n", L3("* в режиме subwallet опасна только фраза #0 (ключ берётся один",
+                          "* in subwallet mode only phrase #0 is dangerous (the key is",
+                          "* 在 subwallet 模式下只有短语 #0 危险（密钥只取一次，"));
+    printf("    %s\n", L3("    раз, его первые 16 байт = фраза #0).",
+                            "    taken once, its first 16 bytes = phrase #0).",
+                            "    其前 16 字节 = 短语 #0）。"));
     return 0;
 }
 
@@ -1627,17 +1664,25 @@ static int cmd_demo_fallback(const Options &o){
     printf("\n");
     printf("  ################################################################\n");
     printf("  #                                                              #\n");
-    printf("  #   ТЕСТ: фраза предсказуема, средства НЕ отправлять           #\n");
+    printf("  #   %s\n", L3("ТЕСТ: фраза предсказуема, средства НЕ отправлять",
+                            "TEST: phrase is predictable, DO NOT send funds",
+                            "测试：短语可预测，切勿转款"));
     printf("  #                                                              #\n");
     printf("  ################################################################\n");
     if (colour) printf("%s", rst);
 
-    printf("\nпоток старой версии (детерминированный fallback), фраза #%llu\n",
+    printf("\n%s #%llu\n", L3("поток старой версии (детерминированный fallback), фраза",
+                              "old version stream (deterministic fallback), phrase",
+                              "旧版数据流（确定性回退），短语"),
            (unsigned long long)o.demoIndex);
     printf("  mnemonic : %s\n", m.c_str());
     printf("  address  : %s\n", a.c_str());
-    printf("\nЭтот режим только воспроизводит старую ошибку и существует для\n");
-    printf("диагностики. Такие фразы НИКОГДА не должны хранить реальные средства.\n");
+    printf("\n%s\n", L3("Этот режим только воспроизводит старую ошибку и существует для",
+                      "This mode only reproduces the old bug and exists for",
+                      "此模式仅复现旧版错误，仅用于"));
+    printf("%s\n", L3("диагностики. Такие фразы НИКОГДА не должны хранить реальные средства.",
+                     "diagnostics. Such phrases must NEVER hold real funds.",
+                     "诊断。此类短语永远不应存放真实资金。"));
     if (!m.empty()) memset(&m[0], 0, m.size());
     return 0;
 }
@@ -1683,6 +1728,7 @@ static void usage(const char *prog, bool dev = false){
 "  --gpu-test         check that GPU and CPU derivations agree, then exit\n"
 "  --wizard           interactive prompt: search / old-phrase check / demo\n"
 "                     (used automatically on double-click)\n"
+"  --lang ru|en|cn   UI language (default ru; or env WTM_LANG)\n"
 "  --help             this text\n"
 "  --help-dev         developer help (extra, insecure diagnostic modes)\n"
 "\n"
@@ -1740,6 +1786,7 @@ static int run_main(int argc, char **argv){
         else if (a == "--insecure-demo-fallback") { o.demoFallback = true; }
         else if (a == "--limit")             o.checkLimit = strtoull(need(i).c_str(), nullptr, 0);
         else if (a == "--index")             o.demoIndex  = strtoull(need(i).c_str(), nullptr, 0);
+        else if (a == "--lang")              g_lang = parse_lang(need(i));
         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 2; }
     }
 
@@ -1897,50 +1944,91 @@ static std::string read_line(const char *prompt){
 // the developer demo.  The check/demo sessions are the same code paths as the
 // --check-fallback-phrase / --insecure-demo-fallback command line options.
 static int interactive_wizard(){
-    printf("\n=== wallet_tg_miner - красивый адрес для WalletTg ===\n\n");
-    printf("Адреса выглядят так:  UQ................................zz\n\n");
+    // 1) language first
+    printf("\nLanguage / Язык / 语言:\n");
+    printf("  1) Русский\n");
+    printf("  2) English\n");
+    printf("  3) 中文\n");
+    std::string lc = read_line("Choice / Выбор / 选择 [1]: ");
+    if (lc == "2") g_lang = LANG_EN;
+    else if (lc == "3") g_lang = LANG_CN;
+    else g_lang = LANG_RU;
 
-    printf("Что сделать:\n");
-    printf("  1) найти красивый адрес (по умолчанию)\n");
-    printf("  2) проверить фразу старой версии\n");
-    printf("     (не сгенерирована ли она старым небезопасным способом)\n");
-    printf("  3) [режим разработчика] показать демо-фразу старого дефекта\n");
-    std::string what = read_line("Выбор [1]: ");
+    printf("\n=== %s ===\n\n", L3("wallet_tg_miner - красивый адрес для WalletTg",
+                                    "wallet_tg_miner - beauty address for WalletTg",
+                                    "wallet_tg_miner - WalletTg 美观地址"));
+    printf("%s  UQ................................zz\n\n",
+           L3("Адреса выглядят так:", "Addresses look like:", "地址示例："));
+
+    printf("%s\n", L3("Что сделать:", "What to do:", "要做什么："));
+    printf("  1) %s\n", L3("найти красивый адрес (по умолчанию)",
+                            "find a beauty address (default)",
+                            "查找美观地址（默认）"));
+    printf("  2) %s\n", L3("проверить фразу старой версии",
+                            "check a phrase from the old version",
+                            "检查旧版短语"));
+    printf("     %s\n", L3("(не сгенерирована ли она старым небезопасным способом)",
+                            "(was it generated by the old insecure method?)",
+                            "（是否由旧版不安全方式生成？）"));
+    printf("  3) %s\n", L3("[режим разработчика] показать демо-фразу старого дефекта",
+                            "[developer mode] show a demo phrase of the old defect",
+                            "【开发者模式】显示旧版缺陷的演示短语"));
+    std::string what = read_line(L3("Выбор [1]: ", "Choice [1]: ", "选择 [1]: "));
 
     std::vector<std::string> a = { "wallet_tg_miner" };
 
     if (what == "2"){
-        printf("\nВведите 12 слов мнемоники через пробел.\n");
-        printf("Фраза проверяется только на этом компьютере, никуда не отправляется\n");
-        printf("и не сохраняется. Лимит — сколько первых фраз потока проверить.\n");
-        std::string phrase = read_line("Мнемоника: ");
-        if (phrase.empty()){ printf("Ничего не введено - выход.\n"); return 1; }
-        std::string lim = read_line("Лимит проверки [100000]: ");
+        printf("\n%s\n", L3("Введите 12 слов мнемоники через пробел.",
+                            "Enter 12 mnemonic words separated by spaces.",
+                            "请输入 12 个助记词，用空格分隔。"));
+        printf("%s\n", L3("Фраза проверяется только на этом компьютере, никуда не отправляется",
+                           "The phrase is checked only on this computer, nothing is sent",
+                           "短语仅在本机检查，不会发送到任何地方"));
+        printf("%s\n", L3("и не сохраняется. Лимит — сколько первых фраз потока проверить.",
+                           "and is not stored. Limit = how many first phrases of the stream to check.",
+                           "且不会保存。限额 = 检查数据流前多少条短语。"));
+        std::string phrase = read_line(L3("Мнемоника: ", "Mnemonic: ", "助记词："));
+        if (phrase.empty()){ printf("%s\n", L3("Ничего не введено - выход.", "Nothing entered - exiting.", "未输入内容 - 退出。")); return 1; }
+        std::string lim = read_line(L3("Лимит проверки [100000]: ", "Check limit [100000]: ", "检查限额 [100000]："));
         a.push_back("--check-fallback-phrase"); a.push_back(phrase);
         if (!lim.empty()){ a.push_back("--limit"); a.push_back(lim); }
     } else if (what == "3"){
-        printf("\nДЕМО СТАРОГО ДЕФЕКТА. Эти фразы предсказуемы -\n");
-        printf("НИКОГДА не переводите на них средства.\n");
-        std::string idx = read_line("Номер фразы [0]: ");
+        printf("\n%s\n", L3("ДЕМО СТАРОГО ДЕФЕКТА. Эти фразы предсказуемы -",
+                            "DEMO OF THE OLD DEFECT. These phrases are predictable -",
+                            "旧版缺陷演示。这些短语可被预测 -"));
+        printf("%s\n", L3("НИКОГДА не переводите на них средства.",
+                           "NEVER send funds to them.",
+                           "切勿向其转账。"));
+        std::string idx = read_line(L3("Номер фразы [0]: ", "Phrase index [0]: ", "短语编号 [0]："));
         a.push_back("--insecure-demo-fallback");
         if (!idx.empty()){ a.push_back("--index"); a.push_back(idx); }
     } else {
-        std::string suf = read_line("Желаемое окончание адреса (например TG): ");
-        if (suf.empty()){ printf("Ничего не введено - выход.\n"); return 1; }
+        std::string suf = read_line(L3("Желаемое окончание адреса (например TG): ",
+                                       "Desired ending of the address (e.g. TG): ",
+                                       "期望的地址结尾（如 TG）："));
+        if (suf.empty()){ printf("%s\n", L3("Ничего не введено - выход.", "Nothing entered - exiting.", "未输入内容 - 退出。")); return 1; }
 
-        printf("\nРежим:\n");
-        printf("  1) рабочий (рекомендуется) - режим фразы: слова сами задают адрес,\n");
-        printf("     поэтому в Telegram после импорта будет ТОТ ЖЕ адрес\n");
-        printf("  2) быстрый - режим subwallet: секунды, но Telegram покажет\n");
-        printf("     ДРУГОЙ адрес (нужен тот же самый subwalletId)\n");
-        std::string mode = read_line("Выбор [1]: ");
+        printf("\n%s\n", L3("Режим:", "Mode:", "模式："));
+        printf("  1) %s\n", L3("рабочий (рекомендуется) - режим фразы: слова сами задают адрес,",
+                                "usable (recommended) - phrase mode: the words themselves set the address,",
+                                "可用（推荐）- 短语模式：单词本身决定地址，"));
+        printf("     %s\n", L3("поэтому в Telegram после импорта будет ТОТ ЖЕ адрес",
+                                "so Telegram shows the SAME address after import",
+                                "因此导入后 Telegram 显示相同地址"));
+        printf("  2) %s\n", L3("быстрый - режим subwallet: секунды, но Telegram покажет",
+                                "fast - subwallet mode: seconds, but Telegram shows",
+                                "快速 - 子钱包模式：几秒，但 Telegram 显示"));
+        printf("     %s\n", L3("ДРУГОЙ адрес (нужен тот же самый subwalletId)",
+                                "a DIFFERENT address (needs the same subwalletId)",
+                                "不同的地址（需要相同的 subwalletId）"));
+        std::string mode = read_line(L3("Выбор [1]: ", "Choice [1]: ", "选择 [1]："));
         const char *m = (mode == "2") ? "subwallet" : "phrase";
 
         a.push_back("--mode"); a.push_back(m);
         a.push_back("--suffix"); a.push_back(suf);
     }
 
-    printf("\nЗапуск...\n\n");
+    printf("\n%s\n\n", L3("Запуск...", "Starting...", "启动..."));
 
     std::vector<char *> av;
     for (auto &x : a) av.push_back(const_cast<char *>(x.c_str()));
@@ -1949,6 +2037,7 @@ static int interactive_wizard(){
 
 int main(int argc, char **argv){
     setup_utf8_console();               // Russian text needs a UTF-8 console
+    if (const char *e = std::getenv("WTM_LANG")) g_lang = parse_lang(e);
     const bool interactive = launched_by_double_click();
 
     int rc;

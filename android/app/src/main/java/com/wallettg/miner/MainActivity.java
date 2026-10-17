@@ -1,10 +1,14 @@
 package com.wallettg.miner;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -57,13 +61,50 @@ public class MainActivity extends Activity {
             double el = (System.currentTimeMillis() - t0) / 1000.0;
             double rate = el > 0 ? a / el : 0;
             String pct = expected > 1.0
-                    ? String.format(Locale.US, "%nШанс: ~%.1f%%", 100.0 * (1.0 - Math.exp(-a / expected)))
+                    ? String.format(Locale.US, "\n" + getString(R.string.chance_fmt), 100.0 * (1.0 - Math.exp(-a / expected)))
                     : "";
             progress.setText(String.format(Locale.US,
-                    "Попыток: %,d%nСкорость: %,.0f/с%nВремя: %.0f с%s", a, rate, el, pct));
+                    getString(R.string.progress_fmt), a, rate, el, pct));
             ui.postDelayed(this, 500);
         }
     };
+
+    private static final String PREFS = "wtm";
+    private static final String KEY_LANG = "lang";
+
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(applyLocale(newBase));
+    }
+
+    private static Context applyLocale(Context ctx) {
+        SharedPreferences p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String lang = p.getString(KEY_LANG, "");
+        if (lang.isEmpty()) return ctx;
+        Locale loc;
+        if ("ru".equals(lang)) loc = new Locale("ru");
+        else if ("zh".equals(lang)) loc = new Locale("zh");
+        else loc = new Locale("en");
+        Configuration c = new Configuration(ctx.getResources().getConfiguration());
+        c.setLocale(loc);
+        return ctx.createConfigurationContext(c);
+    }
+
+    private void maybeAskLanguage() {
+        SharedPreferences p = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (!p.getString(KEY_LANG, "").isEmpty()) return;
+        if (getIntent() != null && getIntent().getExtras() != null && !getIntent().getExtras().isEmpty()) return;
+        String[] items = { getString(R.string.lang_ru), getString(R.string.lang_en), getString(R.string.lang_zh) };
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.lang_title)
+                .setItems(items, (d, which) -> {
+                    String code = (which == 0) ? "ru" : (which == 1) ? "en" : "zh";
+                    p.edit().putString(KEY_LANG, code).apply();
+                    recreate();
+                })
+                .setCancelable(false)
+                .show();
+    }
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -116,6 +157,7 @@ public class MainActivity extends Activity {
                 devPanel.setVisibility(on ? View.VISIBLE : View.GONE));
 
         maybeRunFromIntent();
+        maybeAskLanguage();
     }
 
     private boolean phraseMode() {
@@ -132,7 +174,7 @@ public class MainActivity extends Activity {
     private void runSelftest() {
         boolean ok = Native.selftest();
         Log.i(TAG, "WTM_SELFTEST " + (ok ? "ok" : "fail"));
-        toast(ok ? "Self-test: OK" : "Self-test: FAILED");
+        toast(ok ? getString(R.string.selftest_ok) : getString(R.string.selftest_fail));
     }
 
     /**
@@ -162,13 +204,13 @@ public class MainActivity extends Activity {
         if (running) return;
 
         final String pat = pattern.getText().toString().trim();
-        if (pat.isEmpty()) { toast("Введите окончание или начало"); return; }
+        if (pat.isEmpty()) { toast(getString(R.string.err_empty_pattern)); return; }
 
         for (int i = 0; i < pat.length(); i++) {
             char c = pat.charAt(i);
             boolean ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
                     || (c >= '0' && c <= '9') || c == '-' || c == '_';
-            if (!ok) { toast("Допустимы только A-Z a-z 0-9 - _"); return; }
+            if (!ok) { toast(getString(R.string.err_bad_chars)); return; }
         }
 
         final boolean atEnd = placeGroup.getCheckedRadioButtonId() == R.id.placeEnd;
@@ -190,7 +232,7 @@ public class MainActivity extends Activity {
         setBusy(true);
         running = true;
         t0 = System.currentTimeMillis();
-        progress.setText("Запуск" + (fGpu ? " (GPU)..." : "..."));
+        progress.setText(getString(R.string.starting) + (fGpu ? getString(R.string.starting_gpu) : getString(R.string.starting_cpu)));
         resultCard.setVisibility(View.GONE);
         Log.i(TAG, "WTM_START mode=" + m + " (atEnd=" + atEnd + ") pattern=" + pat);
         ui.post(ticker);
@@ -207,14 +249,14 @@ public class MainActivity extends Activity {
         setBusy(false);
 
         if (r == null) {
-            progress.setText("Внутренняя ошибка");
+            progress.setText(getString(R.string.internal_error));
             Log.i(TAG, "WTM_RESULT error (null)");
             return;
         }
 
         String status = r[0];
         if ("error".equals(status)) {
-            progress.setText("Ошибка: " + r[8]);
+            progress.setText(String.format(getString(R.string.error_fmt), r[8]));
             Log.i(TAG, "WTM_RESULT error: " + r[8]);
             return;
         }
@@ -226,7 +268,7 @@ public class MainActivity extends Activity {
 
         if ("stopped".equals(status)) {
             progress.setText(String.format(Locale.US,
-                    "Остановлено.%nПопыток: %,d%nВремя: %.0f с", attempts, elapsed));
+                    getString(R.string.stopped_fmt), attempts, elapsed));
             Log.i(TAG, "WTM_RESULT stopped attempts=" + attempts);
             return;
         }
@@ -240,20 +282,20 @@ public class MainActivity extends Activity {
                 + " attempts=" + attempts + " mnemonicWords=" + (r[2].isEmpty() ? 0 : r[2].split(" ").length));
 
         StringBuilder sb = new StringBuilder();
-        sb.append("Адрес:\n").append(r[1]).append("\n\n");
-        if (!r[2].isEmpty()) sb.append("Мнемоника:\n").append(r[2]).append("\n\n");
+        sb.append(getString(R.string.address_label)).append(r[1]).append("\n\n");
+        if (!r[2].isEmpty()) sb.append(getString(R.string.mnemonic_label)).append(r[2]).append("\n\n");
         sb.append("subwalletId: ").append(r[5]).append("\n");
-        sb.append("Попыток: ").append(String.format(Locale.US, "%,d", attempts)).append("\n");
-        sb.append(String.format(Locale.US, "Время: %.1f с", elapsed));
-        if ("1".equals(r[9])) sb.append("\nGPU: да");
+        sb.append(getString(R.string.attempts_label)).append(String.format(Locale.US, "%,d", attempts)).append("\n");
+        sb.append(String.format(Locale.US, getString(R.string.time_fmt), elapsed));
+        if ("1".equals(r[9])) sb.append("\n").append(getString(R.string.gpu_yes));
         sb.append("\n\n");
         sb.append(importable
-                ? "✅ Этот адрес появится в Telegram Wallet при импорте фразы."
-                : "⚠️ Нестандартный subwalletId: обычный кошелёк покажет ДРУГОЙ адрес.");
+                ? getString(R.string.found_importable)
+                : getString(R.string.found_nonstandard));
 
         resultBody.setText(sb.toString());
         resultCard.setVisibility(View.VISIBLE);
-        progress.setText(String.format(Locale.US, "Готово! Попыток: %,d за %.0f с", attempts, elapsed));
+        progress.setText(String.format(Locale.US, getString(R.string.done_fmt), attempts, elapsed));
     }
 
     // ---- old-version weak-phrase check ------------------------------------
@@ -265,14 +307,14 @@ public class MainActivity extends Activity {
      */
     private void runFallbackCheck() {
         final String phrase = checkPhrase.getText().toString().trim();
-        if (phrase.isEmpty()) { toast("Введите 12 слов"); return; }
+        if (phrase.isEmpty()) { toast(getString(R.string.enter_12_words)); return; }
 
         long limit = 100000;
         try { limit = Long.parseLong(checkLimit.getText().toString().trim()); } catch (Exception ignored) {}
         if (limit <= 0) limit = 100000;
 
         checkPhrase.setText("");                 // keep the secret out of the UI
-        checkResult.setText("Проверка…");
+        checkResult.setText(getString(R.string.checking));
         final long fLimit = limit;
 
         new Thread(() -> {
@@ -282,15 +324,13 @@ public class MainActivity extends Activity {
     }
 
     private void onCheckResult(String[] r) {
-        if (r == null) { checkResult.setText("Внутренняя ошибка"); return; }
-        if ("error".equals(r[0])) { checkResult.setText("Ошибка: " + r[2]); return; }
+        if (r == null) { checkResult.setText(getString(R.string.internal_error)); return; }
+        if ("error".equals(r[0])) { checkResult.setText(String.format(getString(R.string.error_fmt), r[2])); return; }
         if ("found".equals(r[0])) {
-            checkResult.setText("⚠️ Фраза ПРЕДСКАЗУЕМА: совпадение с потоком старого дефекта, #"
-                    + r[1] + "\nНЕ пользуйтесь этой фразой — переведите средства на новый кошелёк.");
+            checkResult.setText(String.format(getString(R.string.check_found_fmt), r[1]));
             return;
         }
-        checkResult.setText("Совпадений не найдено.\nЭто не гарантия: поток длиннее лимита, "
-                + "а проверка покрывает только 12-словную схему app.");
+        checkResult.setText(getString(R.string.check_notfound));
     }
 
     /** Developer mode only: reproduce an insecure fallback phrase (never for funds). */
@@ -301,12 +341,12 @@ public class MainActivity extends Activity {
 
         String[] r = Native.insecureDemoFallback(idx);
         if (r == null || !"ok".equals(r[0])) {
-            demoResult.setText("Ошибка: " + (r == null ? "null" : r[4]));
+            demoResult.setText(String.format(getString(R.string.demo_error_fmt), (r == null ? "null" : r[4])));
             return;
         }
-        demoResult.setText("ТЕСТ: фраза предсказуема, средства не отправлять\n\n"
-                + "фраза #" + r[1] + "\n" + r[2] + "\n\n"
-                + "адрес: " + r[3]);
+        demoResult.setText(getString(R.string.demo_title) + "\n\n"
+                + getString(R.string.demo_phrase_label) + r[1] + "\n" + r[2] + "\n\n"
+                + getString(R.string.demo_address_label) + r[3]);
     }
 
     private void setBusy(boolean busy) {
@@ -326,10 +366,10 @@ public class MainActivity extends Activity {
     }
 
     private void copyToClipboard(String label, String text) {
-        if (text == null || text.isEmpty()) { toast("Нечего копировать"); return; }
+        if (text == null || text.isEmpty()) { toast(getString(R.string.nothing_to_copy)); return; }
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) cm.setPrimaryClip(ClipData.newPlainText(label, text));
-        toast("Скопировано");
+        toast(getString(R.string.copied));
     }
 
     private void toast(String s) {
