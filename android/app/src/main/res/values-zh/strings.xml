@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WalletTg Miner</string>
+
+    <string name="hint_intro">搜索 WalletTg 钱包的“美观”地址。完全离线运行 — 密钥不会发送到任何地方。</string>
+    <string name="hint_pattern">结尾/开头，例如 qq 或 _tg</string>
+
+    <string name="label_where">在哪里搜索：</string>
+    <string name="place_end">在结尾</string>
+    <string name="place_start">在开头（UQ/EQ 之后）</string>
+
+    <string name="label_mode">要爆破什么：</string>
+    <string name="mode_phrase">助记词（12/24 词，可导入 Telegram）</string>
+    <string name="mode_sub">subwalletId（非常快，但不可导入）</string>
+
+    <string name="label_words">助记词词数：</string>
+
+    <string name="opt_ci">不区分大小写 (a = A)</string>
+    <string name="opt_gpu">使用 GPU (OpenCL)，如果可用</string>
+
+    <string name="btn_start">开始搜索</string>
+    <string name="btn_stop">停止</string>
+    <string name="btn_selftest">自检 (self-test)</string>
+
+    <string name="result_title">完成！找到地址</string>
+    <string name="copy_addr">复制地址</string>
+    <string name="copy_phrase">复制短语</string>
+
+    <string name="hint_safety">切勿向任何人透露助记词。转账前请在区块链上核对地址。</string>
+
+    <string name="check_title">检查旧版短语</string>
+    <string name="check_hint">输入 12 个助记词 — 应用将检查该短语是否由旧版不安全方式（确定性回退）生成。短语仅在设备上处理，不会发送或保存。</string>
+    <string name="check_phrase_hint">用空格分隔的 12 个词</string>
+    <string name="label_limit">检查限额：</string>
+    <string name="btn_check">检查短语</string>
+    <string name="opt_dev">开发者模式</string>
+    <string name="dev_warning">旧版缺陷演示。这些短语可被预测 — 切勿向其转账。</string>
+    <string name="label_index">索引（短语编号）：</string>
+    <string name="btn_demo">显示演示短语</string>
+
+    <string-array name="words_entries">
+        <item>12 词</item>
+        <item>24 词</item>
+    </string-array>
+
+    <!-- runtime / search -->
+    <string name="chance_fmt">概率：~%.1f%%</string>
+    <string name="progress_fmt">尝试：%1$,d\n速度：%2$,.0f/秒\n时间：%3$.0f 秒%4$s</string>
+    <string name="selftest_ok">自检：通过</string>
+    <string name="selftest_fail">自检：失败</string>
+    <string name="err_empty_pattern">请输入结尾或开头</string>
+    <string name="err_bad_chars">仅允许 A-Z a-z 0-9 - _</string>
+    <string name="starting">启动中</string>
+    <string name="starting_gpu"> (GPU)...</string>
+    <string name="starting_cpu">...</string>
+    <string name="internal_error">内部错误</string>
+    <string name="error_fmt">错误：%s</string>
+    <string name="stopped_fmt">已停止。\n尝试：%1$,d\n时间：%2$.0f 秒</string>
+    <string name="address_label">地址：\n</string>
+    <string name="mnemonic_label">助记词：\n</string>
+    <string name="attempts_label">尝试： </string>
+    <string name="time_fmt">时间：%.1f 秒</string>
+    <string name="gpu_yes">GPU：是</string>
+    <string name="found_importable">✅ 导入短语后，该地址将出现在 Telegram Wallet 中。</string>
+    <string name="found_nonstandard">⚠️ 非标准 subwalletId：普通钱包将显示不同的地址。</string>
+    <string name="done_fmt">完成！%1$,d 次尝试，耗时 %2$.0f 秒</string>
+
+    <!-- old-version check -->
+    <string name="enter_12_words">请输入 12 个词</string>
+    <string name="checking">检查中…</string>
+    <string name="check_notfound">未找到匹配。\n这不能保证安全：数据流长于限额，且仅检查 12 词 app 方案。</string>
+    <string name="check_found_fmt">⚠️ 可预测短语：与旧版缺陷数据流匹配，#%s\n请勿使用该短语 — 将资金转移到新钱包。</string>
+
+    <!-- demo -->
+    <string name="demo_error_fmt">错误：%s</string>
+    <string name="demo_title">测试：短语可预测，切勿转款</string>
+    <string name="demo_phrase_label">短语 #</string>
+    <string name="demo_address_label">地址： </string>
+
+    <!-- misc -->
+    <string name="nothing_to_copy">没有可复制的内容</string>
+    <string name="copied">已复制</string>
+
+    <!-- language picker -->
+    <string name="lang_title">选择语言</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_en">English</string>
+    <string name="lang_zh">中文</string>
+</resources>

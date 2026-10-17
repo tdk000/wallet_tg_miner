@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WalletTg Miner</string>
+
+    <string name="hint_intro">Поиск «красивого» адреса кошелька WalletTg. Работает полностью офлайн — ключи никуда не отправляются.</string>
+    <string name="hint_pattern">окончание/начало, напр. qq или _tg</string>
+
+    <string name="label_where">Где искать:</string>
+    <string name="place_end">в окончании</string>
+    <string name="place_start">в начале (после UQ/EQ)</string>
+
+    <string name="label_mode">Что перебирать:</string>
+    <string name="mode_phrase">мнемонику (12/24 слова, импортируется в Telegram)</string>
+    <string name="mode_sub">subwalletId (очень быстро, но не импортируется)</string>
+
+    <string name="label_words">Слов в мнемонике:</string>
+
+    <string name="opt_ci">не учитывать регистр (a = A)</string>
+    <string name="opt_gpu">использовать GPU (OpenCL), если доступно</string>
+
+    <string name="btn_start">Начать поиск</string>
+    <string name="btn_stop">Остановить</string>
+    <string name="btn_selftest">Проверить себя (self-test)</string>
+
+    <string name="result_title">Готово! Адрес найден</string>
+    <string name="copy_addr">Копировать адрес</string>
+    <string name="copy_phrase">Копировать фразу</string>
+
+    <string name="hint_safety">Никому не показывайте мнемонику. Перепроверьте адрес на блокчейне перед переводом средств.</string>
+
+    <string name="check_title">Проверить фразу старой версии</string>
+    <string name="check_hint">Введите 12 слов мнемоники — приложение проверит, не сгенерирована ли она старым небезопасным способом (детерминированный fallback). Фраза обрабатывается только на устройстве, никуда не отправляется и не сохраняется.</string>
+    <string name="check_phrase_hint">12 слов через пробел</string>
+    <string name="label_limit">Лимит проверки:</string>
+    <string name="btn_check">Проверить фразу</string>
+    <string name="opt_dev">Режим разработчика</string>
+    <string name="dev_warning">Демо старого дефекта. Эти фразы предсказуемы — НИКОГДА не переводите на них средства.</string>
+    <string name="label_index">Индекс (фраза №):</string>
+    <string name="btn_demo">Показать демо-фразу</string>
+
+    <string-array name="words_entries">
+        <item>12 слов</item>
+        <item>24 слова</item>
+    </string-array>
+
+    <!-- runtime / search -->
+    <string name="chance_fmt">Шанс: ~%.1f%%</string>
+    <string name="progress_fmt">Попыток: %1$,d\nСкорость: %2$,.0f/с\nВремя: %3$.0f с%4$s</string>
+    <string name="selftest_ok">Self-test: OK</string>
+    <string name="selftest_fail">Self-test: FAILED</string>
+    <string name="err_empty_pattern">Введите окончание или начало</string>
+    <string name="err_bad_chars">Допустимы только A-Z a-z 0-9 - _</string>
+    <string name="starting">Запуск</string>
+    <string name="starting_gpu"> (GPU)...</string>
+    <string name="starting_cpu">...</string>
+    <string name="internal_error">Внутренняя ошибка</string>
+    <string name="error_fmt">Ошибка: %s</string>
+    <string name="stopped_fmt">Остановлено.\nПопыток: %1$,d\nВремя: %2$.0f с</string>
+    <string name="address_label">Адрес:\n</string>
+    <string name="mnemonic_label">Мнемоника:\n</string>
+    <string name="attempts_label">Попыток: </string>
+    <string name="time_fmt">Время: %.1f с</string>
+    <string name="gpu_yes">GPU: да</string>
+    <string name="found_importable">✅ Этот адрес появится в Telegram Wallet при импорте фразы.</string>
+    <string name="found_nonstandard">⚠️ Нестандартный subwalletId: обычный кошелёк покажет ДРУГОЙ адрес.</string>
+    <string name="done_fmt">Готово! %1$,d попыток за %2$.0f с</string>
+
+    <!-- old-version check -->
+    <string name="enter_12_words">Введите 12 слов</string>
+    <string name="checking">Проверка…</string>
+    <string name="check_notfound">Совпадений не найдено.\nЭто не гарантия: поток длиннее лимита, а проверка покрывает только 12-словную схему app.</string>
+    <string name="check_found_fmt">⚠️ Фраза ПРЕДСКАЗУЕМА: совпадение с потоком старого дефекта, #%s\nНЕ пользуйтесь этой фразой — переведите средства на новый кошелёк.</string>
+
+    <!-- demo -->
+    <string name="demo_error_fmt">Ошибка: %s</string>
+    <string name="demo_title">ТЕСТ: фраза предсказуема, средства не отправлять</string>
+    <string name="demo_phrase_label">фраза #</string>
+    <string name="demo_address_label">адрес: </string>
+
+    <!-- misc -->
+    <string name="nothing_to_copy">Нечего копировать</string>
+    <string name="copied">Скопировано</string>
+
+    <!-- language picker -->
+    <string name="lang_title">Выберите язык</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_en">English</string>
+    <string name="lang_zh">中文</string>
+</resources>
