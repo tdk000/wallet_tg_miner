@@ -2024,6 +2024,34 @@ static int interactive_wizard(){
         std::string mode = read_line(L3("Выбор [1]: ", "Choice [1]: ", "选择 [1]："));
         const char *m = (mode == "2") ? "subwallet" : "phrase";
 
+        // GPU only helps in phrase mode (app scheme, 12 words). Probe first, then
+        // let the user pick CPU or GPU with the actual device name shown.
+        if (std::string(m) == "phrase") {
+            gpu::Info gi = gpu::probe();
+            if (gi.ok) {
+                printf("\n%s\n", L3("Обнаружен GPU:", "GPU detected:", "检测到 GPU："));
+                printf("  %s  (%s)\n", gi.device.c_str(), gi.platform.c_str());
+                printf("  %s\n", L3("OpenCL-ядро компилируется ~10 с при старте.",
+                                    "The OpenCL kernel compiles in ~10 s at startup.",
+                                    "启动时 OpenCL 内核编译约需 10 秒。"));
+                printf("  1) %s\n", L3("CPU (по умолчанию)", "CPU (default)", "CPU（默认）"));
+                printf("  2) %s\n", L3("GPU — ускорение ~30x (только phrase/app/12 слов)",
+                                      "GPU — ~30x speedup (phrase/app/12 words only)",
+                                      "GPU — 约 30 倍加速（仅 phrase/app/12 词）"));
+                std::string g = read_line(L3("Выбор [1]: ", "Choice [1]: ", "选择 [1]："));
+                if (g == "2") a.push_back("--gpu");
+            } else {
+                printf("\n%s\n", L3("GPU не обнаружен — будет использован CPU.",
+                                    "No GPU detected — CPU will be used.",
+                                    "未检测到 GPU — 将使用 CPU。"));
+                if (!gi.error.empty()) printf("  (%s)\n", gi.error.c_str());
+            }
+        } else {
+            printf("\n%s\n", L3("В режиме subwallet GPU не используется (и так очень быстро).",
+                                "GPU is not used in subwallet mode (already very fast).",
+                                "subwallet 模式不使用 GPU（已经非常快）。"));
+        }
+
         a.push_back("--mode"); a.push_back(m);
         a.push_back("--suffix"); a.push_back(suf);
     }
