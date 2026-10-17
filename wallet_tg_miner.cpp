@@ -68,6 +68,41 @@
    extern "C" __declspec(dllimport) void *__stdcall GetStdHandle(unsigned long nStdHandle);
    extern "C" __declspec(dllimport) int   __stdcall GetConsoleMode(void *hConsoleHandle, unsigned long *lpMode);
    extern "C" __declspec(dllimport) int   __stdcall SetConsoleMode(void *hConsoleHandle, unsigned long dwMode);
+   // kernel32 console code pages.  A Windows console starts on an OEM code page
+   // (866 on a Russian system) while every message in this program is UTF-8, so
+   // the Russian text came out as mojibake.  Switch the console to UTF-8 for the
+   // duration of the run and put the old code page back on exit.  Redirected
+   // output (a pipe or a file) is left alone: it always gets the raw UTF-8 bytes.
+   extern "C" __declspec(dllimport) unsigned int __stdcall GetConsoleOutputCP(void);
+   extern "C" __declspec(dllimport) int          __stdcall SetConsoleOutputCP(unsigned int id);
+   extern "C" __declspec(dllimport) unsigned int __stdcall GetConsoleCP(void);
+   extern "C" __declspec(dllimport) int          __stdcall SetConsoleCP(unsigned int id);
+   static unsigned int g_saved_out_cp = 0, g_saved_in_cp = 0;
+   static void restore_console_cp() {
+       if (g_saved_out_cp) SetConsoleOutputCP(g_saved_out_cp);
+       if (g_saved_in_cp)  SetConsoleCP(g_saved_in_cp);
+   }
+   static void setup_utf8_console() {
+       if (getenv("WTM_NO_UTF8_CONSOLE")) return;      // escape hatch for scripts
+       std::atexit(restore_console_cp);
+       unsigned long mode = 0;
+       void *ho = GetStdHandle((unsigned long)-11);    // STD_OUTPUT_HANDLE
+       if (ho && GetConsoleMode(ho, &mode)) {
+           unsigned int cp = GetConsoleOutputCP();
+           if (cp && cp != 65001u) {                   // not UTF-8 yet
+               g_saved_out_cp = cp;
+               SetConsoleOutputCP(65001u);
+           }
+       }
+       void *hi = GetStdHandle((unsigned long)-10);    // STD_INPUT_HANDLE
+       if (hi && GetConsoleMode(hi, &mode)) {
+           unsigned int cp = GetConsoleCP();
+           if (cp && cp != 65001u) {
+               g_saved_in_cp = cp;
+               SetConsoleCP(65001u);
+           }
+       }
+   }
    static bool launched_by_double_click() {
        unsigned long procs[4];
        unsigned long n = GetConsoleProcessList(procs, 4);
@@ -105,6 +140,7 @@
        return got == len;
    }
    static bool launched_by_double_click() { return false; }
+   static void setup_utf8_console() {}              // UTF-8 is the default here
 #endif
 
 // ===========================================================================
@@ -1912,6 +1948,7 @@ static int interactive_wizard(){
 }
 
 int main(int argc, char **argv){
+    setup_utf8_console();               // Russian text needs a UTF-8 console
     const bool interactive = launched_by_double_click();
 
     int rc;
