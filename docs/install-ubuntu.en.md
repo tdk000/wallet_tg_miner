@@ -22,13 +22,15 @@ A dark window with a blinking cursor appears — that is expected.
 ### Step 2. Copy one line, paste it, press Enter
 
 ```
-mkdir -p ~/wallet-tg && cd ~/wallet-tg && curl -L -o wallet-tg https://github.com/tdk000/wallet_tg_miner/releases/latest/download/wallet_tg_miner_linux_x86_64 && chmod +x wallet-tg && ./wallet-tg --selftest && echo "alias wallet-tg='$HOME/wallet-tg/wallet-tg --wizard'" >> ~/.bashrc && echo "READY"
+mkdir -p ~/wallet-tg && cd ~/wallet-tg && curl -Ls https://github.com/tdk000/wallet_tg_miner/releases/latest/download/wallet-tg-linux-x86_64.tar.gz | tar xz && ./wallet-tg --selftest && echo "alias wallet-tg='$HOME/wallet-tg/wallet-tg --wizard'" >> ~/.bashrc && echo "READY"
 ```
 
 **Pasting:** in a terminal it is **Ctrl + Shift + V** (not Ctrl + V), or
 right-click → "Paste".
 
-About 1.3 MB is downloaded and the built-in self-test runs immediately. Takes seconds.
+About 0.5 MB is downloaded and unpacked into a ready-to-run `wallet-tg` — the
+executable bit is already inside the archive, nothing else has to be configured.
+The built-in self-test runs immediately. Takes seconds.
 
 ### Step 3. Check the result
 
@@ -63,8 +65,14 @@ The tool prints progress, finds an address and shows it together with 12 words.
 ### On ARM (Raspberry Pi, ARM server)
 
 Check with `uname -m`. If it prints `aarch64`, replace
-`wallet_tg_miner_linux_x86_64` with `wallet_tg_miner_linux_aarch64` in the line
-from step 2.
+`wallet-tg-linux-x86_64.tar.gz` with `wallet-tg-linux-aarch64.tar.gz` in the line
+from step 2. Everything else stays the same.
+
+### If you would rather not use an archive
+
+The release also contains the bare binaries `wallet_tg_miner_linux_x86_64` and
+`wallet_tg_miner_linux_aarch64`. With those you have to run `chmod +x` yourself,
+which is why the archive is friendlier for beginners.
 
 ---
 
@@ -141,11 +149,11 @@ type it blind and press Enter.
 No internet, or stale package lists. Check the connection and repeat the whole line.
 
 **`Permission denied`**
-Way 1 already runs `chmod +x`; if you launch the file yourself, run `chmod +x wallet-tg`
-in its directory first.
+Should not happen: the archive already carries the executable bit. If you downloaded
+the bare binary instead, run `chmod +x wallet-tg` in its directory.
 
 **Updating to a newer version**
-Way 1: repeat the line from step 2 (the file is overwritten).
+Way 1: repeat the line from step 2 (the archive unpacks over the old file).
 Way 2: repeat the line from way 2.
 
 **Uninstalling**

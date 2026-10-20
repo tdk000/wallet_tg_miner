@@ -22,13 +22,15 @@
 ### Шаг 2. Скопируй одну строку, вставь, нажми Enter
 
 ```
-mkdir -p ~/wallet-tg && cd ~/wallet-tg && curl -L -o wallet-tg https://github.com/tdk000/wallet_tg_miner/releases/latest/download/wallet_tg_miner_linux_x86_64 && chmod +x wallet-tg && ./wallet-tg --selftest && echo "alias wallet-tg='$HOME/wallet-tg/wallet-tg --wizard'" >> ~/.bashrc && echo "ГОТОВО"
+mkdir -p ~/wallet-tg && cd ~/wallet-tg && curl -Ls https://github.com/tdk000/wallet_tg_miner/releases/latest/download/wallet-tg-linux-x86_64.tar.gz | tar xz && ./wallet-tg --selftest && echo "alias wallet-tg='$HOME/wallet-tg/wallet-tg --wizard'" >> ~/.bashrc && echo "ГОТОВО"
 ```
 
 **Вставить:** в Терминале это **Ctrl + Shift + V** (не Ctrl + V!), либо правая
 кнопка мыши → «Вставить».
 
-Скачается файл ~1,3 МБ и сразу прогонит самопроверку. Ждать несколько секунд.
+Скачается архив ~0,5 МБ и распакуется в готовый файл `wallet-tg` — права на
+запуск уже внутри архива, ничего дополнительно настраивать не нужно.
+Затем сразу прогонится самопроверка. Ждать несколько секунд.
 
 ### Шаг 3. Проверь результат
 
@@ -62,8 +64,14 @@ all self-tests passed
 ### Если у тебя ARM (Raspberry Pi, ARM-сервер)
 
 Проверить: в Терминале набери `uname -m`. Если ответ `aarch64` — в строке из
-шага 2 замени `wallet_tg_miner_linux_x86_64` на `wallet_tg_miner_linux_aarch64`
-(и `-o wallet-tg` можно оставить как есть).
+шага 2 замени `wallet-tg-linux-x86_64.tar.gz` на `wallet-tg-linux-aarch64.tar.gz`.
+Всё остальное остаётся тем же.
+
+### Если не хочется архива
+
+В релизе лежат и отдельные файлы без упаковки:
+`wallet_tg_miner_linux_x86_64` и `wallet_tg_miner_linux_aarch64`. С ними нужно
+самостоятельно сделать `chmod +x` — поэтому для новичков архив удобнее.
 
 ---
 
@@ -141,11 +149,11 @@ sudo apt update && sudo apt install -y g++ git && rm -rf ~/wallet_tg_miner && gi
 Нет интернета или устарели списки пакетов. Проверь сеть, повтори строку целиком.
 
 **`Permission denied`**
-Строка из способа 1 уже делает `chmod +x`; если запускаешь файл вручную, выполни
-`chmod +x wallet-tg` в его папке.
+Такого быть не должно: в архиве права на запуск уже выставлены. Если скачивал
+отдельный файл без архива — выполни `chmod +x wallet-tg` в его папке.
 
-**Хочу обновить до свежей версии**
-Способ 1: повтори строку из шага 2 (файл перезапишется свежим).
+**`Хочу обновить до свежей версии`**
+Способ 1: повтори строку из шага 2 (архив распакуется поверх, файл заменится).
 Способ 2: повтори строку из способа 2.
 
 **Хочу удалить**
