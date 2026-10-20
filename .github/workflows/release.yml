@@ -76,11 +76,31 @@ jobs:
           aarch64-linux-gnu-strip wallet_tg_miner_linux_aarch64
           qemu-aarch64-static ./wallet_tg_miner_linux_aarch64 --selftest
 
+      - name: Package tarballs
+        # The archive holds a single file called "wallet-tg" with the exec bit
+        # already set, so installing is just `curl -Ls <url> | tar xz` — no
+        # chmod, no rename, no compiler.  The archive name is stable (no
+        # version), so /releases/latest/download/<name> keeps working forever.
+        run: |
+          mkdir -p pkg
+          cp wallet_tg_miner_linux_x86_64 pkg/wallet-tg
+          tar --owner=0 --group=0 --numeric-owner -czf wallet-tg-linux-x86_64.tar.gz -C pkg wallet-tg
+          cp wallet_tg_miner_linux_aarch64 pkg/wallet-tg
+          tar --owner=0 --group=0 --numeric-owner -czf wallet-tg-linux-aarch64.tar.gz -C pkg wallet-tg
+          echo "--- archive contents ---"
+          tar tzvf wallet-tg-linux-x86_64.tar.gz
+          # Smoke test: unpack exactly like a user does and run the self-test.
+          mkdir -p /tmp/unpack && tar xzf wallet-tg-linux-x86_64.tar.gz -C /tmp/unpack
+          /tmp/unpack/wallet-tg --selftest
+          ls -l wallet-tg-linux-*.tar.gz
+
       - name: Publish CLI binaries
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           files: |
+            wallet-tg-linux-x86_64.tar.gz
+            wallet-tg-linux-aarch64.tar.gz
             wallet_tg_miner_linux_x86_64
             wallet_tg_miner_linux_aarch64
 
