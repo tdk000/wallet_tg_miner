@@ -50,6 +50,17 @@
 #include "gpu_opencl.h"
 #include "miner_api.h"
 
+// ===========================================================================
+//  Default subwalletId per network.
+//  Source of truth: the official WalletTg contract
+//      ton-blockchain/tg-wallet-contract @ 10a0d2b9e87bd0a5e9135c2431e3eb15c6a0485c
+//      contracts/WalletTg/storage.tolk, comment on Storage.subwalletId:
+//          "Default for mainnet: 0x7FFF7F11; for testnet: 0x7FFF7FFD;"
+//  Do not edit the values: both networks are fixed by the deployed contract.
+// ===========================================================================
+static const uint32_t kSubwalletMainnet = 0x7FFF7F11u;
+static const uint32_t kSubwalletTestnet = 0x7FFF7FFDu;
+
 // UI language for the interactive wizard and the legacy check/demo output.
 // Default is Russian (matches the historical behaviour of the CLI).
 enum Lang { LANG_RU = 0, LANG_EN = 1, LANG_CN = 2 };
@@ -785,7 +796,7 @@ struct Options {
     int  words = 12;                 // 12 or 24
     int  threads = 0;
     bool testnet = false;
-    uint32_t subwalletId = 0x7FFF7F11u;
+    uint32_t subwalletId = kSubwalletMainnet;
     bool haveSubwallet = false;
     std::string mnemonic;            // fixed mnemonic (optional)
     uint64_t maxTries = 0;           // 0 = unlimited
@@ -869,7 +880,7 @@ static bool selftest(){
             auto hv = [](char c){ return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
             pub[i] = (uint8_t)((hv(pubhex[i*2]) << 4) | hv(pubhex[i*2+1]));
         }
-        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        uint8_t a[36]; wallet_address(pub, kSubwalletMainnet, false, a);
         std::string s; addr_to_string(a, s);
         if (s != "UQAbzItZqG4Emy2gouoSMn5PXT--1pT6KuO_JlzeTOKAh_E7"){
             printf("[FAIL] address vector: %s\n", s.c_str()); fail++;
@@ -889,11 +900,26 @@ static bool selftest(){
         if (hexcmp(pub,32,"7952e94118f34607c75e23258dd9220d66ccac5a3ee074125c25068e8107bfbf")){
             printf("[FAIL] ed25519 pubkey\n"); fail++;
         } else printf("[ok]   ed25519 pubkey\n");
-        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        uint8_t a[36]; wallet_address(pub, kSubwalletMainnet, false, a);
         std::string s; addr_to_string(a, s);
         if (s != "UQD4d2pzr-W4jzh1wOd52HrsH7rRagzkSUPC3_jCgMxmKz_L"){
             printf("[FAIL] mnemonic address: %s\n", s.c_str()); fail++;
         } else printf("[ok]   mnemonic address\n");
+    }
+
+    // the same mnemonic on testnet: default subwalletId 0x7FFF7FFD per the
+    // official storage.tolk, tag 0xD1 -> friendly prefix "0Q"
+    {
+        const std::string m =
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon about";
+        uint8_t sec[32]; app_derive_secret(m, sec);
+        uint8_t pub[32]; ed25519_pubkey(pub, sec);
+        uint8_t a[36]; wallet_address(pub, kSubwalletTestnet, true, a);
+        std::string s; addr_to_string(a, s);
+        if (s != "0QC41OIkrSNrd0hhRjqVKzUm-1luBAivADU423xoOxelSnT3"){
+            printf("[FAIL] testnet mnemonic address: %s\n", s.c_str()); fail++;
+        } else printf("[ok]   testnet mnemonic address\n");
     }
 
     // BIP39 generation vectors (entropy 0 -> canonical phrases)
@@ -932,7 +958,7 @@ static bool selftest(){
         if (hexcmp(pub,32,"752e39c11db80956eead808156347d120bbffb655b520ad2748da10c61cd242a")){
             printf("[FAIL] ton pubkey\n"); fail++;
         } else printf("[ok]   ton pubkey\n");
-        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        uint8_t a[36]; wallet_address(pub, kSubwalletMainnet, false, a);
         std::string s; addr_to_string(a, s);
         if (s != "UQDWukXCchiV2P81LG_vOCKhBFmLVY56nuvLUlMTWXrgQH4S"){
             printf("[FAIL] ton address: %s\n", s.c_str()); fail++;
@@ -951,7 +977,7 @@ static bool selftest(){
 
         uint8_t sec[32]; app_derive_secret(m, sec);
         uint8_t pub[32]; ed25519_pubkey(pub, sec);
-        uint8_t a[36]; wallet_address(pub, 0x7FFF7F11u, false, a);
+        uint8_t a[36]; wallet_address(pub, kSubwalletMainnet, false, a);
         std::string s; addr_to_string(a, s);
         if (s != "UQB2dHHyDGA9mVPSe8-QgFQsuOKF7zwEFAwsCQrw-Qx8dUy9"){
             printf("[FAIL] fallback phrase #0 address: %s\n", s.c_str()); fail++;
@@ -1252,7 +1278,7 @@ static void benchmark(){
         bip39_from_entropy(ent, 16, m);
         uint8_t sec[32]; app_derive_secret(m, sec);
         ed25519_pubkey(pk, sec);
-        uint8_t addr[36]; wallet_address(pk, 0x7FFF7F11u, false, addr);
+        uint8_t addr[36]; wallet_address(pk, kSubwalletMainnet, false, addr);
     }
     b = clk();
     printf("phrase attempt  : %12.0f/s\n", rate(N, a, b));
@@ -1388,7 +1414,7 @@ static void demo_insecure_fallback(uint64_t index, std::string &mnemonic, std::s
 
     uint8_t sec[32];  app_derive_secret(mnemonic, sec);
     uint8_t pub[32];  ed25519_pubkey(pub, sec);
-    uint8_t addr[36]; wallet_address(pub, 0x7FFF7F11u, false, addr);
+    uint8_t addr[36]; wallet_address(pub, kSubwalletMainnet, false, addr);
     addr_to_string(addr, address);
 
     memset(ent, 0, sizeof(ent));
@@ -1400,7 +1426,7 @@ static void demo_insecure_fallback(uint64_t index, std::string &mnemonic, std::s
 //  namespace, so it can reach the internal types above.
 // ===========================================================================
 static bool importable_for(const Options &o, const Found &found){
-    const uint32_t netDefault = o.testnet ? 0x7FFF7F7Du : 0x7FFF7F11u;
+    const uint32_t netDefault = o.testnet ? kSubwalletTestnet : kSubwalletMainnet;
     return found.subwalletId == netDefault && o.scheme == "app";
 }
 
@@ -1513,7 +1539,7 @@ extern "C" int wtm_run(const wtm_params *p, wtm_result *out){
         if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_'))
             return fail("pattern must be base64url (A-Za-z0-9-_)");
     }
-    if (o.testnet && !o.haveSubwallet) o.subwalletId = 0x7FFF7F7Du;
+    if (o.testnet && !o.haveSubwallet) o.subwalletId = kSubwalletTestnet;
 
     wallet_init_code_hash();
 
@@ -1714,7 +1740,7 @@ static void usage(const char *prog, bool dev = false){
 "  --threads N        worker threads (default: CPU count)\n"
 "  --mnemonic \"...\"   use a fixed mnemonic (subwallet mode)\n"
 "  --subwallet HEX    fixed subwallet id (default 0x7FFF7F11 mainnet)\n"
-"  --testnet          testnet (subwallet 0x7FFF7F7D, tag 0xD1)\n"
+"  --testnet          testnet (subwallet 0x7FFF7FFD, tag 0xD1)\n"
 "  --max-tries N      stop after N attempts\n"
 "  --quiet            less output\n"
 "  --bench            measure hash/derivation throughput and exit\n"
@@ -1840,7 +1866,7 @@ static int run_main(int argc, char **argv){
         }
     }
 
-    if (o.testnet && !o.haveSubwallet) o.subwalletId = 0x7FFF7F7Du;
+    if (o.testnet && !o.haveSubwallet) o.subwalletId = kSubwalletTestnet;
 
     int nthreads = o.threads > 0 ? o.threads : (int)std::thread::hardware_concurrency();
     if (nthreads <= 0) nthreads = 1;
@@ -1895,7 +1921,7 @@ static int run_main(int argc, char **argv){
     printf("  elapsed     : %.1fs\n", elapsed);
     printf("\n");
     // ---- importability check ------------------------------------------------
-    const uint32_t netDefault = o.testnet ? 0x7FFF7F7Du : 0x7FFF7F11u;
+    const uint32_t netDefault = o.testnet ? kSubwalletTestnet : kSubwalletMainnet;
     const bool standardSubwallet = (found.subwalletId == netDefault);
 
     printf("--- IMPORT CHECK (will the wallet show this address?) ---\n");

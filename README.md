@@ -138,7 +138,7 @@ wallet_tg_miner --mode subwallet --suffix TG
 | `--threads N`   | число потоков (по умолчанию — все ядра) |
 | `--mnemonic "..."` | зафиксировать мнемонику (для режима `subwallet`) |
 | `--subwallet HEX`  | зафиксировать `subwalletId` (по умолчанию `0x7FFF7F11`) |
-| `--testnet`     | тестовая сеть (`subwalletId = 0x7FFF7F7D`, тег `0xD1`) |
+| `--testnet`     | тестовая сеть (`subwalletId = 0x7FFF7FFD`, тег `0xD1`) |
 | `--max-tries N` | остановиться после `N` попыток |
 | `--quiet`       | не печатать прогресс |
 | `--bench`       | замерить скорость хеширования и выйти |
@@ -148,6 +148,20 @@ wallet_tg_miner --mode subwallet --suffix TG
 | `--gpu-info`    | показать найденное OpenCL-устройство и выйти |
 | `--gpu-test`    | сверить GPU-деривацию с CPU и выйти |
 | `--wizard`      | интерактивный мастер: поиск / проверка фразы старой версии / демо (запускается сам при двойном клике) |
+
+Значения `subwalletId` по умолчанию заданы официальным контрактом Telegram Wallet —
+[`contracts/WalletTg/storage.tolk`](https://github.com/ton-blockchain/tg-wallet-contract/blob/10a0d2b9e87bd0a5e9135c2431e3eb15c6a0485c/contracts/WalletTg/storage.tolk)
+(комментарий к полю `subwalletId`):
+
+| Сеть | `subwalletId` по умолчанию |
+|------|----------------------------|
+| mainnet | `0x7FFF7F11` |
+| testnet | `0x7FFF7FFD` |
+
+> ⚠️ **Исправлен `subwalletId` по умолчанию для testnet.** Ранее здесь ошибочно стояло
+> `0x7FFF7F7D` (опечатка вместо `0x7FFF7FFD`), поэтому адреса, сгенерированные в режиме
+> `--testnet` до этого исправления, были **неверными**. Значение mainnet (`0x7FFF7F11`)
+> не менялось.
 
 Допустимые символы шаблона — алфавит base64url: `A-Z a-z 0-9 - _`.
 
