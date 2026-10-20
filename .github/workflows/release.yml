@@ -40,3 +40,47 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           files: android/app/build/outputs/apk/debug/app-debug.apk
+
+  # Prebuilt CLI binaries for Linux.  Static, so they run on any glibc or musl
+  # distribution without a compiler and without installing anything.  Both are
+  # self-tested before upload: the x86_64 one natively, the aarch64 one under
+  # qemu, so a release can never ship a binary whose crypto vectors do not match.
+  cli-linux:
+    name: CLI binaries (Linux)
+    runs-on: ubuntu-22.04   # g++ 11 -> glibc 2.35, the oldest still-supported LTS
+    needs: release          # upload to the release created by the APK job
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install cross compiler and qemu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-aarch64-linux-gnu qemu-user-static
+
+      - name: Build x86_64 (static)
+        run: |
+          g++ -std=c++17 -O3 -pthread -static \
+            wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c \
+            -o wallet_tg_miner_linux_x86_64 -ldl
+          strip wallet_tg_miner_linux_x86_64
+          ./wallet_tg_miner_linux_x86_64 --selftest
+
+      - name: Build aarch64 (static)
+        run: |
+          aarch64-linux-gnu-g++ -std=c++17 -O3 -pthread -static \
+            wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c \
+            -o wallet_tg_miner_linux_aarch64 -ldl
+          aarch64-linux-gnu-strip wallet_tg_miner_linux_aarch64
+          qemu-aarch64-static ./wallet_tg_miner_linux_aarch64 --selftest
+
+      - name: Publish CLI binaries
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            wallet_tg_miner_linux_x86_64
+            wallet_tg_miner_linux_aarch64
+
