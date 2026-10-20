@@ -104,3 +104,52 @@ jobs:
             wallet_tg_miner_linux_x86_64
             wallet_tg_miner_linux_aarch64
 
+  # Windows build.  Before this job existed the .exe was attached by hand, so a
+  # release could easily ship without it (v1.3.2 and v1.3.3 did) and Windows
+  # users were left guessing.  /MT links the C runtime statically, so the exe
+  # runs on a clean machine without the VC++ redistributable; /utf-8 keeps the
+  # Russian messages intact.
+  cli-windows:
+    name: CLI binary (Windows)
+    runs-on: windows-latest
+    needs: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        run: >
+          cl /nologo /std:c++17 /O2 /EHsc /MT /utf-8
+          wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c
+          /Fe:wallet_tg_miner.exe advapi32.lib
+
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $out = ./wallet_tg_miner.exe --selftest
+          $out | Select-Object -Last 3
+          if ($LASTEXITCODE -ne 0) { throw "self-test exited with $LASTEXITCODE" }
+          if (-not ($out -match 'all self-tests passed')) { throw "self-test did not report success" }
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          # wallet_tg_miner.exe is the tool itself (double-click opens the wizard),
+          # start.bat is the classic menu.  Both stay in one folder, nothing to install.
+          Compress-Archive -Path wallet_tg_miner.exe, start.bat -DestinationPath wallet-tg-windows-x86_64.zip -Force
+          Get-Item wallet_tg-windows-x86_64.zip | Format-Table Name, Length
+          Get-ChildItem wallet_tg_miner.exe, start.bat | Format-Table Name, Length
+
+      - name: Publish CLI binary
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          files: wallet-tg-windows-x86_64.zip
+
