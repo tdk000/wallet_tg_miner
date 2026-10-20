@@ -1,0 +1,16 @@
+# Line endings that actually matter.
+#
+# Shell scripts are executed by dash/bash on Linux and macOS. With CRLF endings
+# the shebang line and `set -e` break, and the script dies with
+#   build.sh: 3: set: Illegal option -
+# on every Linux machine. That happens whenever the repository is checked out on
+# Windows (core.autocrlf=true) and the tree is then copied, mounted or zipped
+# over to Linux, so pin LF for the shell scripts explicitly.
+#
+# Windows batch files are the mirror case: cmd.exe chokes on LF-only line
+# endings in some constructs (labels, multi-line blocks), so keep CRLF there.
+*.sh       text eol=lf
+*.command  text eol=lf
+Makefile   text eol=lf
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
