@@ -143,9 +143,27 @@ jobs:
         run: |
           # wallet_tg_miner.exe is the tool itself (double-click opens the wizard),
           # start.bat is the classic menu.  Both stay in one folder, nothing to install.
-          Compress-Archive -Path wallet_tg_miner.exe, start.bat -DestinationPath wallet-tg-windows-x86_64.zip -Force
-          Get-Item wallet_tg-windows-x86_64.zip | Format-Table Name, Length
-          Get-ChildItem wallet_tg_miner.exe, start.bat | Format-Table Name, Length
+          # Built with .NET ZipFile instead of Compress-Archive: the latter silently
+          # produced nothing on the runner.
+          $here = Get-Location
+          $zip = Join-Path $here 'wallet-tg-windows-x86_64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
+          try {
+            foreach ($name in @('wallet_tg_miner.exe', 'start.bat')) {
+              $full = Join-Path $here $name
+              if (-not (Test-Path $full)) { throw "missing $name" }
+              [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $full, $name)
+            }
+          } finally {
+            $archive.Dispose()
+          }
+          if (-not (Test-Path $zip)) { throw "zip was not created" }
+          Get-Item $zip | Format-Table Name, Length
+          # Smoke test: the archive must open and contain both files.
+          $check = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try { $check.Entries | Format-Table Name, Length } finally { $check.Dispose() }
 
       - name: Publish CLI binary
         uses: softprops/action-gh-release@v3
