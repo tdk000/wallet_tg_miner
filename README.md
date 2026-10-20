@@ -68,6 +68,26 @@ make            # или: cmake -B build && cmake --build build --config Release
 
 Готовые однострочники — в `build.bat` (Windows) и `build.sh` (Linux/macOS).
 
+### Вариант E. Проверка сборки на Linux (`test-linux.sh`)
+
+```bash
+sh test-linux.sh            # сборка + self-test + бенчмарк
+sh test-linux.sh --search   # то же плюс один реальный поиск адреса
+
+CXX=clang++ sh test-linux.sh   # другим компилятором C++17
+```
+
+Скрипт ничего не скачивает и не пишет вне каталога исходников. Код выхода `0`
+означает, что сборка прошла, все эталонные векторы сошлись и (с `--search`)
+адрес действительно найден. Проверено на Ubuntu 22.04 / 24.04, Debian 12,
+g++ 11–13, clang 18 и на aarch64.
+
+> **Про `build.sh` и переводы строк.** Запускайте его как `sh build.sh` (файл
+> исполняемый, но `./build.sh` работает не везде — например, если каталог
+> смонтирован с `noexec`). Если дерево было выкачано на Windows с
+> `core.autocrlf=true` и перенесено на Linux, переводы строк CRLF ломают
+> `build.sh` (`set: Illegal option -`); `.gitattributes` фиксирует LF для `*.sh`.
+
 ---
 
 ## 3. Быстрый старт

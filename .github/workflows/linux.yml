@@ -1,0 +1,60 @@
+name: Linux build
+
+# Guards the Linux / macOS-side build of the CLI: several compilers, both LTS
+# Ubuntu generations, a real search run and an aarch64 cross-build.  The tool has
+# no dependencies, so everything here is just a compiler plus the source tree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.cxx }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04     # g++ 11
+            cxx: g++
+          - os: ubuntu-24.04     # g++ 13
+            cxx: g++
+          - os: ubuntu-24.04     # clang 18
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compiler
+        run: ${{ matrix.cxx }} --version | head -1
+      - name: Build, self-test and benchmark
+        run: CXX=${{ matrix.cxx }} sh test-linux.sh
+
+  search:
+    name: real address search (phrase mode)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and find an address ending with "AA"
+        run: sh test-linux.sh --search
+
+  arm64:
+    name: aarch64 cross-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cross compiler and qemu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-aarch64-linux-gnu qemu-user-static
+      - name: Cross-compile (static)
+        run: |
+          aarch64-linux-gnu-g++ -std=c++17 -O3 -pthread -static \
+            wallet_tg_miner.cpp gpu_opencl.cpp monocypher.c \
+            -o wallet_tg_miner_aarch64 -ldl
+      - name: Self-test under qemu
+        run: qemu-aarch64-static ./wallet_tg_miner_aarch64 --selftest
