@@ -9,8 +9,10 @@
 #ifndef WALLET_TG_MINER_GPU_OPENCL_H
 #define WALLET_TG_MINER_GPU_OPENCL_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -42,19 +44,45 @@ public:
     AppDeriver(const AppDeriver &) = delete;
     AppDeriver &operator=(const AppDeriver &) = delete;
 
+    // How many batches may be queued by submit() before it refuses work.
+    static constexpr int kDepth = 3;
+
     bool init(std::string *err);
     void shutdown();
     bool ok() const { return kern_ != nullptr; }
 
+    // Blocking: writes the batch, runs the kernel, waits, reads the result.
     // secrets is resized to mnemonics.size() * 32.
     bool derive(const std::vector<std::string> &mnemonics,
                 std::vector<uint8_t> &secrets, std::string *err);
+
+    // Pipelined mode.  submit() only enqueues work and returns; while the GPU
+    // crunches the batch, the caller derives keys for a previous one.  Up to
+    // kDepth batches may be in flight.  Takes ownership of the mnemonics.
+    bool submit(std::vector<std::string> &&mnemonics, std::string *err);
+    // Waits for the OLDEST queued batch and hands its mnemonics and secrets back.
+    bool wait(std::vector<std::string> &mnemonics,
+              std::vector<uint8_t> &secrets, std::string *err);
+    int  inFlight() const { return (int)queue_.size(); }
 
     double lastKernelSeconds() const { return lastSeconds_; }
     const Info &info() const { return info_; }
 
 private:
     bool ensureBuffers(size_t poolBytes, size_t count);
+
+    // One pipeline slot: device buffers + host staging that must outlive the
+    // non-blocking writes.
+    struct Slot {
+        cl_mem in = nullptr, lens = nullptr, out = nullptr;
+        size_t capIn = 0, capLens = 0, capOut = 0;
+        std::vector<uint8_t>     hostPool;
+        std::vector<uint32_t>    hostLens;
+        std::vector<std::string> mnemonics;
+        size_t count = 0;
+    };
+    bool ensureSlot(Slot &s, size_t needMnem, size_t needLens, size_t needOut, std::string *err);
+    void releaseSlots();
 
     OclApi       api_;
     Info         info_;
@@ -69,6 +97,8 @@ private:
     size_t       capLens_ = 0;
     size_t       capOut_  = 0;
     double       lastSeconds_ = 0.0;
+    std::array<Slot, kDepth> slots_{};
+    std::deque<size_t>       queue_;
 };
 
 } // namespace gpu

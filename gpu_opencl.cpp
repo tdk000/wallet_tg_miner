@@ -245,6 +245,7 @@ bool AppDeriver::init(std::string *err) {
 }
 
 void AppDeriver::shutdown() {
+    releaseSlots();
     if (api_.ReleaseMemObject) {
         if (bufMnem_) { api_.ReleaseMemObject(bufMnem_); bufMnem_ = nullptr; }
         if (bufLens_) { api_.ReleaseMemObject(bufLens_); bufLens_ = nullptr; }
@@ -326,6 +327,132 @@ bool AppDeriver::derive(const std::vector<std::string> &mn,
 
     rc = api_.EnqueueReadBuffer(q_, bufOut_, CL_TRUE, 0, needOut, secrets.data(), 0, nullptr, nullptr);
     if (rc != CL_SUCCESS) { if (err) *err = "clEnqueueReadBuffer failed"; return false; }
+    return true;
+}
+
+// ---- pipelined mode ------------------------------------------------------
+//
+// The synchronous derive() above leaves the GPU idle while the caller derives
+// ed25519 keys for the batch it just received (on a 2-core machine that is
+// 2.0 s of CPU work against 0.75 s of GPU work).  submit()/wait() let the
+// caller keep up to kDepth batches queued: wait() blocks only until the OLDEST
+// kernel finishes, and everything queued behind it keeps running.
+//
+// All writes are non-blocking, so the host staging buffers must stay alive
+// until the slot's read has completed - they live in the Slot itself.
+
+void AppDeriver::releaseSlots() {
+    if (api_.ReleaseMemObject) {
+        for (Slot &s : slots_) {
+            if (s.in)   { api_.ReleaseMemObject(s.in);   s.in = nullptr; }
+            if (s.lens) { api_.ReleaseMemObject(s.lens); s.lens = nullptr; }
+            if (s.out)  { api_.ReleaseMemObject(s.out);  s.out = nullptr; }
+            s.capIn = s.capLens = s.capOut = 0;
+        }
+    }
+    queue_.clear();
+}
+
+bool AppDeriver::ensureSlot(Slot &s, size_t needMnem, size_t needLens, size_t needOut, std::string *err) {
+    cl_int rc = CL_SUCCESS;
+    if (needMnem > s.capIn) {
+        if (s.in) api_.ReleaseMemObject(s.in);
+        s.in = api_.CreateBuffer(ctx_, CL_MEM_READ_ONLY, needMnem, nullptr, &rc);
+        if (!s.in || rc != CL_SUCCESS) { s.capIn = 0; if (err) *err = "clCreateBuffer(mnem) failed"; return false; }
+        s.capIn = needMnem;
+    }
+    if (needLens > s.capLens) {
+        if (s.lens) api_.ReleaseMemObject(s.lens);
+        s.lens = api_.CreateBuffer(ctx_, CL_MEM_READ_ONLY, needLens, nullptr, &rc);
+        if (!s.lens || rc != CL_SUCCESS) { s.capLens = 0; if (err) *err = "clCreateBuffer(lens) failed"; return false; }
+        s.capLens = needLens;
+    }
+    if (needOut > s.capOut) {
+        if (s.out) api_.ReleaseMemObject(s.out);
+        s.out = api_.CreateBuffer(ctx_, CL_MEM_WRITE_ONLY, needOut, nullptr, &rc);
+        if (!s.out || rc != CL_SUCCESS) { s.capOut = 0; if (err) *err = "clCreateBuffer(out) failed"; return false; }
+        s.capOut = needOut;
+    }
+    return true;
+}
+
+bool AppDeriver::submit(std::vector<std::string> &&mnemonics, std::string *err) {
+    if (!kern_) { if (err) *err = "GPU not initialised"; return false; }
+    if ((int)queue_.size() >= kDepth) { if (err) *err = "GPU pipeline is full"; return false; }
+
+    const size_t count = mnemonics.size();
+    if (count == 0) return true;
+
+    // Find a slot that is not in flight.
+    size_t si = (size_t)-1;
+    for (size_t i = 0; i < slots_.size() && si == (size_t)-1; i++) {
+        bool used = false;
+        for (size_t q : queue_) if (q == i) { used = true; break; }
+        if (!used) si = i;
+    }
+    if (si == (size_t)-1) { if (err) *err = "GPU pipeline is full"; return false; }
+    Slot &s = slots_[si];
+
+    size_t maxlen = 0;
+    for (const std::string &x : mnemonics) if (x.size() > maxlen) maxlen = x.size();
+    const uint32_t stride = (uint32_t)(maxlen ? maxlen : 1);
+
+    s.hostPool.assign(count * stride, 0);
+    s.hostLens.resize(count);
+    for (size_t i = 0; i < count; i++) {
+        std::memcpy(&s.hostPool[i * stride], mnemonics[i].data(), mnemonics[i].size());
+        s.hostLens[i] = (cl_uint)mnemonics[i].size();
+    }
+
+    const size_t needMnem = s.hostPool.size();
+    const size_t needLens = count * sizeof(cl_uint);
+    const size_t needOut  = count * 32;
+    if (!ensureSlot(s, needMnem, needLens, needOut, err)) return false;
+
+    // Non-blocking writes: the data is copied by the runtime while the kernel
+    // of a previous batch is still running.
+    api_.EnqueueWriteBuffer(q_, s.in,   CL_FALSE, 0, needMnem, s.hostPool.data(), 0, nullptr, nullptr);
+    api_.EnqueueWriteBuffer(q_, s.lens, CL_FALSE, 0, needLens, s.hostLens.data(), 0, nullptr, nullptr);
+
+    cl_uint cnt = (cl_uint)count;
+    api_.SetKernelArg(kern_, 0, sizeof(cl_mem),  &s.in);
+    api_.SetKernelArg(kern_, 1, sizeof(cl_mem),  &s.lens);
+    api_.SetKernelArg(kern_, 2, sizeof(cl_uint), &stride);
+    api_.SetKernelArg(kern_, 3, sizeof(cl_mem),  &s.out);
+    api_.SetKernelArg(kern_, 4, sizeof(cl_uint), &cnt);
+
+    size_t local = 64;
+    if (info_.maxWorkGroup && local > info_.maxWorkGroup) local = info_.maxWorkGroup;
+    if (local == 0) local = 1;
+    size_t global = ((count + local - 1) / local) * local;
+
+    cl_int rc = api_.EnqueueNDRangeKernel(q_, kern_, 1, nullptr, &global, &local, 0, nullptr, nullptr);
+    if (rc != CL_SUCCESS) { if (err) *err = "clEnqueueNDRangeKernel failed"; return false; }
+
+    s.count = count;
+    s.mnemonics = std::move(mnemonics);
+    queue_.push_back(si);
+    return true;
+}
+
+bool AppDeriver::wait(std::vector<std::string> &mnemonics, std::vector<uint8_t> &secrets, std::string *err) {
+    if (queue_.empty()) { if (err) *err = "nothing in flight"; return false; }
+    const size_t si = queue_.front();
+    queue_.pop_front();
+    Slot &s = slots_[si];
+
+    secrets.assign(s.count * 32, 0);
+    auto t0 = std::chrono::steady_clock::now();
+    // Blocking read of the OLDEST batch.  The queue is in-order, so this waits
+    // for this slot's kernel only - later batches keep the GPU busy.
+    cl_int rc = api_.EnqueueReadBuffer(q_, s.out, CL_TRUE, 0, s.count * 32, secrets.data(), 0, nullptr, nullptr);
+    auto t1 = std::chrono::steady_clock::now();
+    lastSeconds_ = std::chrono::duration<double>(t1 - t0).count();
+    if (rc != CL_SUCCESS) { if (err) *err = "clEnqueueReadBuffer failed"; return false; }
+
+    mnemonics = std::move(s.mnemonics);
+    s.mnemonics.clear();
+    s.count = 0;
     return true;
 }
 

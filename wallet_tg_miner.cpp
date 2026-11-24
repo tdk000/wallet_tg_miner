@@ -49,6 +49,7 @@
 #include "bip39_english.h"
 #include "gpu_opencl.h"
 #include "miner_api.h"
+#include "ed25519_fast.h"
 
 // ===========================================================================
 //  Default subwalletId per network.
@@ -412,6 +413,77 @@ void ed25519_pubkey(uint8_t pk[32], const uint8_t seed[32]){
     memset(h, 0, sizeof(h));
     memset(a, 0, sizeof(a));
     memset(b, 0, sizeof(b));
+}
+
+// ===========================================================================
+//  Fast fixed-base variant (see ed25519_fast.h).
+//
+//  Same result, ~3x faster, variable time.  Used ONLY by the mining hot loop,
+//  where the input is a freshly generated mnemonic; every check, self-test and
+//  user-visible phrase keeps using ed25519_pubkey() above.
+//
+//  The table is built once and validated against ed25519_pubkey() on a batch of
+//  deterministic seeds.  On any mismatch the fast path stays off and the miner
+//  silently uses the reference implementation.
+// ===========================================================================
+#if EDFAST_HAVE
+static edfast::Base g_fastBase;
+static bool          g_fastKey = false;
+static bool          g_fastKeyChecked = false;
+
+static bool fast_key_init(int probes, bool verbose){
+    if (g_fastKeyChecked) return g_fastKey;
+    g_fastKeyChecked = true;
+
+    uint8_t one[32] = {1}, encB[32];
+    crypto_eddsa_scalarbase(encB, one);
+    if (!g_fastBase.init(encB)){
+        if (verbose) fprintf(stderr, "[fast] base table init failed, using Monocypher\n");
+        return false;
+    }
+    uint32_t s = 0x9E3779B9u;
+    for (int i = 0; i < probes; i++){
+        uint8_t seed[32], ref[32], got[32];
+        for (int j = 0; j < 32; j++){
+            s = s * 1664525u + 1013904223u;
+            seed[j] = (uint8_t)(s >> 24);
+        }
+        ed25519_pubkey(ref, seed);
+        uint8_t h[64], a[32], b[32];
+        sha512(seed, 32, h);
+        memcpy(a, h, 32);
+        crypto_eddsa_trim_scalar(b, a);
+        g_fastBase.scalarmult_base(got, b);
+        if (memcmp(ref, got, 32) != 0){
+            if (verbose){
+                fprintf(stderr, "[fast] self-check failed, using Monocypher\n");
+                for (int j = 0; j < 32; j++) fprintf(stderr, "%02x", seed[j]);
+                fprintf(stderr, "\n");
+            }
+            return false;
+        }
+    }
+    g_fastKey = true;
+    return true;
+}
+#endif
+
+// The hot-path public key: fast when available, reference otherwise.
+static void ed25519_pubkey_fast(uint8_t pk[32], const uint8_t seed[32]){
+#if EDFAST_HAVE
+    if (g_fastKey){
+        uint8_t h[64], a[32], b[32];
+        sha512(seed, 32, h);
+        memcpy(a, h, 32);
+        crypto_eddsa_trim_scalar(b, a);
+        g_fastBase.scalarmult_base(pk, b);
+        memset(h, 0, sizeof(h));
+        memset(a, 0, sizeof(a));
+        memset(b, 0, sizeof(b));
+        return;
+    }
+#endif
+    ed25519_pubkey(pk, seed);
 }
 
 // ===========================================================================
@@ -806,6 +878,7 @@ struct Options {
     bool gpu = false;                // use OpenCL if available (phrase mode)
     bool gpuInfo = false;
     bool gpuTest = false;
+    bool gpuBench = false;
     std::string pattern;
 
     // legacy weak-phrase tools (see "Legacy deterministic fallback stream")
@@ -1008,6 +1081,27 @@ static bool selftest(){
         else printf("[ok]   fallback check checksum error\n");
     }
 
+    // fast fixed-base scalar multiplication (used by the mining hot loop only)
+    {
+#if EDFAST_HAVE
+        if (fast_key_init(256, false)){
+            const std::string m =
+                "abandon abandon abandon abandon abandon abandon "
+                "abandon abandon abandon abandon abandon about";
+            uint8_t sec[32]; app_derive_secret(m, sec);
+            uint8_t p1[32], p2[32];
+            ed25519_pubkey(p1, sec);
+            ed25519_pubkey_fast(p2, sec);
+            if (memcmp(p1, p2, 32) != 0){ printf("[FAIL] ed25519 fast\n"); fail++; }
+            else printf("[ok]   ed25519 fast (256 random seeds + vector)\n");
+        } else {
+            printf("[skip] ed25519 fast (self-check failed, reference is used)\n");
+        }
+#else
+        printf("[skip] ed25519 fast (no unsigned __int128 on this compiler)\n");
+#endif
+    }
+
     printf(fail ? "\n%d self-test(s) FAILED\n" : "\nall self-tests passed\n", fail);
     return fail == 0;
 }
@@ -1100,6 +1194,11 @@ enum class GpuRun { Ran, Unavailable, EntropyError };
 //  The GPU derives the 32-byte `app` secret (PBKDF2 + SLIP-0010 -- the part
 //  that dominates the CPU cost); the CPU pool then derives the ed25519 public
 //  key and the TON address for every secret in the batch.
+//
+//  The two halves are overlapped: up to gpu::AppDeriver::kDepth batches are
+//  queued, so while the CPU derives keys for the batch that just arrived the
+//  GPU is already working on the next ones.  Without this the GPU idles for
+//  the whole CPU phase (which is the longer one on a 2-core machine).
 // ---------------------------------------------------------------------------
 static GpuRun gpu_phrase_search(const Options &o, Found &f, int nthreads){
     gpu::AppDeriver der;
@@ -1118,28 +1217,38 @@ static GpuRun gpu_phrase_search(const Options &o, Found &f, int nthreads){
 
     Rng rng;
     if (!rng.seed()) return GpuRun::EntropyError;
-    std::vector<std::string> mn; mn.reserve(B);
+    std::vector<std::string> gen;      // mnemonics being produced
+    std::vector<std::string> batch;    // mnemonics of the batch that just finished
     std::vector<uint8_t> sec;
 
     while (!g_stop.load()){
-        if (o.maxTries && g_attempts.load(std::memory_order_relaxed) >= o.maxTries){ g_stop = true; break; }
-
-        mn.clear();
-        for (size_t i = 0; i < B && !g_stop.load(); i++){
-            uint8_t ent[32];
-            rng.fill(ent, entBytes);
-            std::string m;
-            bip39_from_entropy(ent, entBytes, m);
-            mn.push_back(std::move(m));
+        // Keep the pipeline fed.
+        while (der.inFlight() < gpu::AppDeriver::kDepth && !g_stop.load()){
+            if (o.maxTries && g_attempts.load(std::memory_order_relaxed) >= o.maxTries){ g_stop = true; break; }
+            gen.clear();
+            gen.reserve(B);
+            for (size_t i = 0; i < B && !g_stop.load(); i++){
+                uint8_t ent[32];
+                rng.fill(ent, entBytes);
+                std::string m;
+                bip39_from_entropy(ent, entBytes, m);
+                gen.push_back(std::move(m));
+            }
+            if (gen.empty()) break;
+            if (!der.submit(std::move(gen), &err)){
+                fprintf(stderr, "[gpu] %s\n", err.c_str());
+                return GpuRun::Unavailable;
+            }
         }
-        if (mn.empty()) break;
+        if (der.inFlight() == 0) break;
 
-        if (!der.derive(mn, sec, &err)){
+        // Oldest batch is ready; the rest keep the GPU busy while we work.
+        if (!der.wait(batch, sec, &err)){
             fprintf(stderr, "[gpu] %s\n", err.c_str());
             return GpuRun::Unavailable;
         }
 
-        const size_t n = mn.size();
+        const size_t n = batch.size();
         std::atomic<size_t> next{0};
         auto job = [&](){
             uint8_t pub[32], addr[36];
@@ -1147,10 +1256,10 @@ static GpuRun gpu_phrase_search(const Options &o, Found &f, int nthreads){
                 size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= n || g_stop.load()) break;
                 const uint8_t *s = &sec[i * 32];
-                ed25519_pubkey(pub, s);
+                ed25519_pubkey_fast(pub, s);
                 wallet_address(pub, o.subwalletId, o.testnet, addr);
                 if (addr_matches(addr, o.pattern, o.matchStart, o.ci)){
-                    report_found(o, f, mn[i], o.subwalletId, pub, addr);
+                    report_found(o, f, batch[i], o.subwalletId, pub, addr);
                     return;
                 }
                 g_attempts.fetch_add(1, std::memory_order_relaxed);
@@ -1209,6 +1318,123 @@ static int gpu_selftest(){
     double ms = std::chrono::duration<double>(t1 - t0).count() * 1000.0;
     if (!fail) printf("[ok]   GPU matches CPU on %zu mnemonics (%.1f ms)\n", mn.size(), ms);
     return fail ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+//  --gpu-bench: A/B measurement of the GPU pipeline.
+//
+//  Phase 1 is the old behaviour: derive a batch, then hand it to the CPU pool,
+//  strictly one after the other.  Phase 2 overlaps the stages with
+//  AppDeriver::submit()/wait().  Same batch size, same amount of work, so the
+//  ratio is the pipeline gain on this machine (and the stage split shows where
+//  the time actually goes).
+// ---------------------------------------------------------------------------
+static int gpu_bench_cmd(const Options &o){
+    gpu::AppDeriver der; std::string err;
+    if (!der.init(&err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return 1; }
+    const gpu::Info &gi = der.info();
+
+    int nt = o.threads > 0 ? o.threads : (int)std::thread::hardware_concurrency();
+    if (nt <= 0) nt = 1;
+    const size_t B = (size_t)1 << 16;
+    const int entBytes = 12;
+
+    bool fast = false;
+#if EDFAST_HAVE
+    fast = fast_key_init(64, true);
+#endif
+    printf("gpu           : %s (%s), %u CU\n", gi.device.c_str(), gi.vendor.c_str(), gi.computeUnits);
+    printf("batch         : %zu mnemonics\n", B);
+    printf("cpu threads   : %d\n", nt);
+    printf("ed25519 tail  : %s\n", fast ? "fast fixed-base" : "Monocypher (reference)");
+    printf("\n");
+
+    Rng rng;
+    if (!rng.seed()) fatal_entropy();
+
+    std::vector<std::string> mn;
+    std::vector<uint8_t> sec;
+    auto clk = []{ return std::chrono::steady_clock::now(); };
+    auto dt = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){
+        return std::chrono::duration<double>(b - a).count();
+    };
+    auto gen = [&](std::vector<std::string> &out){
+        out.clear();
+        out.reserve(B);
+        for (size_t i = 0; i < B; i++){
+            uint8_t ent[32];
+            rng.fill(ent, entBytes);
+            std::string m;
+            bip39_from_entropy(ent, entBytes, m);
+            out.push_back(std::move(m));
+        }
+    };
+    // CPU tail: one ed25519 key per secret (the address hash is ~0.2 % on top).
+    auto tail_time = [&](const std::vector<uint8_t> &secrets){
+        auto t0 = clk();
+        std::atomic<size_t> next{0};
+        const size_t n = secrets.size() / 32;
+        auto job = [&](){
+            uint8_t pk[32];
+            for (;;){
+                size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= n) break;
+                ed25519_pubkey_fast(pk, &secrets[i * 32]);
+            }
+        };
+        std::vector<std::thread> ts;
+        for (int t = 0; t < nt; t++) ts.emplace_back(job);
+        for (auto &t : ts) t.join();
+        return dt(t0, clk());
+    };
+
+    const int nb = 4;
+
+    // ---- phase 1: synchronous -------------------------------------------
+    double gen1 = 0, gpu1 = 0, tail1 = 0;
+    const auto sync0 = clk();
+    for (int i = 0; i < nb; i++){
+        auto a0 = clk(); gen(mn);               gen1  += dt(a0, clk());
+        a0 = clk();
+        if (!der.derive(mn, sec, &err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return 1; }
+        gpu1 += dt(a0, clk());
+        tail1 += tail_time(sec);
+    }
+    const double t_sync = dt(sync0, clk());
+
+    // ---- phase 2: pipelined ---------------------------------------------
+    const auto pipe0 = clk();
+    int submitted = 0, done = 0;
+    double tail2 = 0;
+    while (submitted < nb && der.inFlight() < gpu::AppDeriver::kDepth){
+        gen(mn);
+        if (!der.submit(std::move(mn), &err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return 1; }
+        submitted++;
+    }
+    while (done < nb){
+        if (!der.wait(mn, sec, &err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return 1; }
+        tail2 += tail_time(sec);
+        done++;
+        if (submitted < nb){
+            gen(mn);
+            if (!der.submit(std::move(mn), &err)){ fprintf(stderr, "[gpu] %s\n", err.c_str()); return 1; }
+            submitted++;
+        }
+    }
+    const double t_pipe = dt(pipe0, clk());
+
+    const double work = (double)nb * (double)B;
+    printf("synchronous   : %10.0f mnemonics/s\n", work / t_sync);
+    printf("  mnemonics   : %8.2f s   (%.0f %% of wall)\n", gen1,  100.0 * gen1  / t_sync);
+    printf("  gpu stage   : %8.2f s   (%.0f %% of wall)\n", gpu1,  100.0 * gpu1  / t_sync);
+    printf("  cpu tail    : %8.2f s   (%.0f %% of wall)\n", tail1, 100.0 * tail1 / t_sync);
+    printf("pipelined     : %10.0f mnemonics/s\n", work / t_pipe);
+    printf("  cpu tail    : %8.2f s\n", tail2);
+    printf("overlap gain  : x%.2f\n", t_sync / t_pipe);
+    if (fast)
+        printf("\nnote: the CPU tail uses the fast fixed-base ed25519; with the\n"
+               "      Monocypher version the tail would be ~3x longer.\n");
+    return 0;
 }
 
 static double expected_attempts(const std::string &pat, bool ci){
@@ -1271,6 +1497,16 @@ static void benchmark(){
     for (int i = 0; i < N; i++){ seed[0] = (uint8_t)i; ed25519_pubkey(pk, seed); }
     b = clk();
     printf("ed25519 pubkey  : %12.0f/s\n", rate(N, a, b));
+#if EDFAST_HAVE
+    if (fast_key_init(64, true)){
+        N = 20000; a = clk();
+        for (int i = 0; i < N; i++){ seed[0] = (uint8_t)i; ed25519_pubkey_fast(pk, seed); }
+        b = clk();
+        printf("ed25519 pubkey  : %12.0f/s   (fast fixed-base, used by --gpu)\n", rate(N, a, b));
+    } else {
+        printf("ed25519 pubkey  :          n/a   (fast fixed-base disabled)\n");
+    }
+#endif
 
     N = 2000; a = clk();
     for (int i = 0; i < N; i++){
@@ -1752,6 +1988,7 @@ static void usage(const char *prog, bool dev = false){
 "                     Falls back to the CPU automatically when OpenCL is absent.\n"
 "  --gpu-info         print the detected OpenCL device and exit\n"
 "  --gpu-test         check that GPU and CPU derivations agree, then exit\n"
+"  --gpu-bench        measure the GPU pipeline with and without overlap\n"
 "  --wizard           interactive prompt: search / old-phrase check / demo\n"
 "                     (used automatically on double-click)\n"
 "  --lang ru|en|cn   UI language (default ru; or env WTM_LANG)\n"
@@ -1807,6 +2044,7 @@ static int run_main(int argc, char **argv){
         else if (a == "--no-gpu")            o.gpu = false;
         else if (a == "--gpu-info")          o.gpuInfo = true;
         else if (a == "--gpu-test")          o.gpuTest = true;
+        else if (a == "--gpu-bench")         o.gpuBench = true;
         else if (a == "--help-dev")          { usage(argv[0], true); return 0; }
         else if (a == "--check-fallback-phrase")  { o.checkFallback = true; o.checkPhrase = need(i); }
         else if (a == "--insecure-demo-fallback") { o.demoFallback = true; }
@@ -1817,6 +2055,11 @@ static int run_main(int argc, char **argv){
     }
 
     wallet_init_code_hash();
+#if EDFAST_HAVE
+    // Fail-safe: build the fixed-base table and verify it against the
+    // reference implementation before the mining loop may use it.
+    fast_key_init(64, true);
+#endif
     if (o.selftest) return selftest() ? 0 : 1;
     if (o.gpuTest)  return gpu_selftest();
     if (o.gpuInfo){
@@ -1832,6 +2075,7 @@ static int run_main(int argc, char **argv){
         printf("max work-group : %zu\n", gi.maxWorkGroup);
         return 0;
     }
+    if (o.gpuBench) return gpu_bench_cmd(o);
     if (o.bench){ benchmark(); return 0; }
 
     // legacy weak-phrase tools (independent of the search options above)
